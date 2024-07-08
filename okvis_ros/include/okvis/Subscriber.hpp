@@ -95,6 +95,10 @@
 #include <okvis/cameras/NCameraSystem.hpp>
 #include <okvis/kinematics/Transformation.hpp>
 
+#include </home/ubuntu/noetic_ws/devel/include/forward_sonar/OculusFire.h>
+#include </home/ubuntu/noetic_ws/devel/include/forward_sonar/OculusPing.h>
+
+
 /// \brief okvis Main namespace of this package.
 namespace okvis {
 
@@ -154,6 +158,9 @@ class Subscriber {
   boost::shared_ptr<tf2_ros::TransformListener> tfListener_;
   void sonarCallback(const imagenex831l::ProcessedRange::ConstPtr& msg);
 
+  // @ShuPan
+  void sonarpingCallback(const forward_sonar::OculusPing::ConstPtr& msg);
+  void forwardsonarCallback(const sensor_msgs::ImageConstPtr& msg);
   /// @}
   /// @name Direct (no ROS) callbacks and other sensor related methods.
   /// @{
@@ -185,12 +192,18 @@ class Subscriber {
   unsigned int imgLeftCounter;                                 // @Sharmin
   unsigned int imgRightCounter;                                // @Sharmin
   ros::Subscriber subImu_;                                     ///< The IMU message subscriber.
-  ros::Subscriber subSonarRange_;                              ///< The Sonar Range Subscriber @Sharmin
+  ros::Subscriber subSonarRange_;                              ///< The Sonar Range Subscriber @Shu
+  ros::Subscriber subSonarPing_;                              ///< The Sonar Range Subscriber @Shu
   ros::Subscriber subDepth_;                                   ///< The Depth Subscriber @Sharmin
   ros::Subscriber subReloPoints_;  ///< The Relocalization Points Subscriber from pose_graph @Sharmin
   cv::Ptr<cv::CLAHE> clahe;        /// Sharmin
   /// @}
 
+  // add by ShuPan
+  double sonar_range_;
+  double range_resolution_;
+  double ImageprocessTime_ = 0;
+  bool Sonarres_Initialization_ = false;
 #ifdef HAVE_LIBVISENSOR
   std::shared_ptr<visensor::ViSensorDriver> sensor_;  ///< The sensor API.
   dynamic_reconfigure::Server<okvis_ros::CameraConfig>

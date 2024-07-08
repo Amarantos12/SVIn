@@ -222,6 +222,17 @@ class VioInterface {
   /// \param heading  head position of sonar beam.
   virtual bool addSonarMeasurement(const okvis::Time& stamp, double range, double heading) = 0;
 
+  /// @ShuPan
+  /// \brief          Add an Forward Sonar measurement.
+  /// \param stamp    The measurement timestamp.
+  /// \param image    The forward sonar image at this time.
+  /// \param sonar_range    Max range sonar beam hit
+  /// \param range_resolution  resolution between sonar beam.
+  virtual bool addFSonarMeasurement(const okvis::Time& stamp,
+                                    const cv::Mat& image,
+                                    double sonar_range,
+                                    double range_resolution) = 0;
+
   /// \brief                      Add a position measurement.
   /// \warning Not Implemented.
   /*

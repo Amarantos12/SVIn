@@ -54,6 +54,8 @@
 /// @Sharmin
 #include <okvis/IdProvider.hpp>
 
+#define pi 3.1415926535898
+
 int nNextId = 0;  // FIXME Sharmin To remove this global variable.
 int numKF = 0;    // Sharmin: Number of keyframe
 
@@ -101,6 +103,7 @@ namespace okvis {
 uint64_t frameCnt = 0;  // Sharmin
 
 static const int max_camera_input_queue_size = 10;
+static const int max_sonar_input_queue_size = 20;
 static const okvis::Duration temporal_imu_data_overlap(
     0.02);  // overlap of imu data before and after two consecutive frames [seconds]
 okvis::Duration temporal_relo_data_overlap(0.2);
@@ -115,6 +118,7 @@ ThreadedKFVio::ThreadedKFVio(okvis::VioParameters& parameters,
       repropagationNeeded_(false),
       frameSynchronizer_(okvis::FrameSynchronizer(parameters)),
       lastAddedImageTimestamp_(okvis::Time(0, 0)),
+      lastAddedSonarImageTimestamp_(okvis::Time(0, 0)),
       optimizationDone_(true),
       estimator_(estimator),
       frontend_(frontend),
@@ -130,6 +134,7 @@ ThreadedKFVio::ThreadedKFVio(okvis::VioParameters& parameters)
       repropagationNeeded_(false),
       frameSynchronizer_(okvis::FrameSynchronizer(parameters)),
       lastAddedImageTimestamp_(okvis::Time(0, 0)),
+      lastAddedSonarImageTimestamp_(okvis::Time(0, 0)),
       optimizationDone_(true),
       estimator_(),
       frontend_(parameters.nCameraSystem.numCameras()),
@@ -179,7 +184,10 @@ void ThreadedKFVio::init() {
       cv::namedWindow(windowname.str());
     }
   }
-
+  // ShuPan
+  if (parameters_.sensorList.isForwardSonarUsed) {
+      frontend_.setForwardsonarUsed(true);
+  }
   startThreads();
 }
 
@@ -198,6 +206,12 @@ void ThreadedKFVio::startThreads() {
   if (parameters_.sensorList.isSonarUsed) {
     sonarConsumerThread_ = std::thread(&ThreadedKFVio::sonarConsumerLoop, this);  // @Sharmin
   }
+
+  // ShuPan
+  if (parameters_.sensorList.isForwardSonarUsed) {
+    forwardsonarConsumerThread_ = std::thread(&ThreadedKFVio::forwardsonarConsumerLoop, this); // Shu Pan
+  }
+
   // Sharmin
   if (parameters_.sensorList.isDepthUsed) {
     depthConsumerThread_ = std::thread(&ThreadedKFVio::depthConsumerLoop, this);  // @Sharmin
@@ -229,6 +243,12 @@ ThreadedKFVio::~ThreadedKFVio() {
   if (parameters_.sensorList.isSonarUsed) {
     sonarMeasurementsReceived_.Shutdown();  // @Sharmin
   }
+
+  // ShuPan
+  if (parameters_.sensorList.isForwardSonarUsed) {
+    ForwardsonarMeasurementsReceived_.Shutdown();
+  }
+
   // Sharmin
   if (parameters_.sensorList.isDepthUsed) {
     depthMeasurementsReceived_.Shutdown();  // @Sharmin
@@ -254,6 +274,13 @@ ThreadedKFVio::~ThreadedKFVio() {
   if (parameters_.sensorList.isSonarUsed) {
     sonarConsumerThread_.join();
   }
+
+  // ShuPan
+  if (parameters_.sensorList.isForwardSonarUsed) {
+    forwardsonarConsumerThread_.join();
+  }
+
+
   // Sharmin
   if (parameters_.sensorList.isDepthUsed) {
     depthConsumerThread_.join();
@@ -369,6 +396,36 @@ bool ThreadedKFVio::addSonarMeasurement(const okvis::Time& stamp, double range, 
                                                              maxImuInputQueueSize_);  // Running same rate as imu
     return sonarMeasurementsReceived_.Size() == 1;
   }
+}
+
+// Add by ShuPan
+// Add a new forward sonar image.
+bool ThreadedKFVio::addFSonarMeasurement(const okvis::Time& stamp,
+                                         const cv::Mat& image,
+                                         double sonar_range,
+                                         double range_resolution) {
+    if (lastAddedSonarImageTimestamp_ > stamp) {
+        LOG(ERROR) << "Received image from the past. Dropping the image.";
+        return false;
+    }
+    sonar_resolution = range_resolution;
+    lastAddedSonarImageTimestamp_ = stamp;
+    okvis::ForwardSonarMeasurement sonar_frame;
+    sonar_frame.measurement.image = image;
+    sonar_frame.timeStamp = stamp;
+    sonar_frame.measurement.range = sonar_range;
+    sonar_frame.measurement.resolution = range_resolution;
+//    imshow("sonarImage", image);
+    if (blocking_) {
+        ForwardsonarMeasurementsReceived_.PushBlockingIfFull(sonar_frame, 1);
+        return true;
+    } else {
+        ForwardsonarMeasurementsReceived_.PushNonBlockingDroppingIfFull(sonar_frame, max_sonar_input_queue_size);
+        return ForwardsonarMeasurementsReceived_.Size() == 1;
+    }
+//    imshow("sonarImage", image);
+//    waitKey(1);
+
 }
 
 // @Sharmin
@@ -507,8 +564,10 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
       std::lock_guard<std::mutex> lock(lastState_mutex_);
       waitForStateVariablesMutexTimer.stop();
       T_WS = lastOptimized_T_WS_;
+      T_WSLast_ = lastOptimized_T_WS_;
       speedAndBiases = lastOptimizedSpeedAndBiases_;
       lastTimestamp = lastOptimizedStateTimestamp_;
+      lastforwardsonartime_ = lastOptimizedStateTimestamp_;
       // std::cout<< "lastOptimizedStateTimestamp_: "<< lastOptimizedStateTimestamp_ << std::endl;
     }
 
@@ -641,62 +700,62 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
       }
     }
     // Sonar
-    if (parameters_.sensorList.isSonarUsed) {
-      // -- get relevant sonar messages for new state
-      okvis::Time sonarDataEndTime = multiFrame->timestamp();
-      okvis::Time sonarDataBeginTime = lastTimestamp;
-
-      OKVIS_ASSERT_TRUE_DBG(
-          Exception, sonarDataBeginTime < sonarDataEndTime, "sonar data end time is smaller than begin time.");
-
-      // wait until all relevant sonar messages have arrived and check for termination request
-      if (sonarFrameSynchronizer_.waitForUpToDateSonarData(okvis::Time(sonarDataEndTime)) == false) {
-        return;
-      }
-      OKVIS_ASSERT_TRUE_DBG(Exception,
-                            sonarDataEndTime < sonarMeasurements_.back().timeStamp,
-                            "Waiting for up to date sonar data seems to have failed!");
-
-      okvis::SonarMeasurementDeque sonarData = getSonarMeasurements(sonarDataBeginTime, sonarDataEndTime);
-
-      // if sonar_data is empty, either end_time > begin_time or
-      // no measurements in timeframe, should not happen, as we waited for measurements
-      if (sonarData.size() == 0) {
-        beforeDetectTimer.stop();
-        continue;
-      }
-
-      if (sonarData.front().timeStamp > frame->timeStamp) {
-        LOG(WARNING) << "Frame is newer than oldest Sonar measurement. Dropping it.";
-        beforeDetectTimer.stop();
-        continue;
-      }
-
-      okvis::kinematics::Transformation T_WSo = T_WS * parameters_.sonar.T_SSo;
-
-      // LOG (INFO) << "StereoRig V2 translation T_SSo: " << T_SSo.r();
-      // LOG (INFO) << "StereoRig V2 rot T_SSo: " << T_SSo.q().toRotationMatrix();
-
-      // TODO(sharmin) check it
-      // Add sonar landmark (in world frame) to the graph
-      for (okvis::SonarMeasurementDeque::const_iterator it = sonarData.begin(); it != sonarData.end(); ++it) {
-        double range = it->measurement.range;
-        double heading = it->measurement.heading;
-        uint64_t lmId = okvis::IdProvider::instance().newId();
-
-        okvis::kinematics::Transformation sonar_point(Eigen::Vector3d(range * cos(heading), range * sin(heading), 0.0),
-                                                      Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
-        okvis::kinematics::Transformation T_WSo_point = T_WSo * sonar_point;
-
-        Eigen::Vector3d sonar_landmark = T_WSo_point.r();
-
-        {
-          std::lock_guard<std::mutex> l(estimator_mutex_);
-          estimator_.addSonarLandmark(lmId,
-                                      Eigen::Vector4d(sonar_landmark[0], sonar_landmark[1], sonar_landmark[2], 1.0));
-        }
-      }
-    }
+//    if (parameters_.sensorList.isSonarUsed) {
+//      // -- get relevant sonar messages for new state
+//      okvis::Time sonarDataEndTime = multiFrame->timestamp();
+//      okvis::Time sonarDataBeginTime = lastTimestamp;
+//
+//      OKVIS_ASSERT_TRUE_DBG(
+//          Exception, sonarDataBeginTime < sonarDataEndTime, "sonar data end time is smaller than begin time.");
+//
+//      // wait until all relevant sonar messages have arrived and check for termination request
+//      if (sonarFrameSynchronizer_.waitForUpToDateSonarData(okvis::Time(sonarDataEndTime)) == false) {
+//        return;
+//      }
+//      OKVIS_ASSERT_TRUE_DBG(Exception,
+//                            sonarDataEndTime < sonarMeasurements_.back().timeStamp,
+//                            "Waiting for up to date sonar data seems to have failed!");
+//
+//      okvis::SonarMeasurementDeque sonarData = getSonarMeasurements(sonarDataBeginTime, sonarDataEndTime);
+//
+//      // if sonar_data is empty, either end_time > begin_time or
+//      // no measurements in timeframe, should not happen, as we waited for measurements
+//      if (sonarData.size() == 0) {
+//        beforeDetectTimer.stop();
+//        continue;
+//      }
+//
+//      if (sonarData.front().timeStamp > frame->timeStamp) {
+//        LOG(WARNING) << "Frame is newer than oldest Sonar measurement. Dropping it.";
+//        beforeDetectTimer.stop();
+//        continue;
+//      }
+//
+//      okvis::kinematics::Transformation T_WSo = T_WS * parameters_.sonar.T_SSo;
+//
+//      // LOG (INFO) << "StereoRig V2 translation T_SSo: " << T_SSo.r();
+//      // LOG (INFO) << "StereoRig V2 rot T_SSo: " << T_SSo.q().toRotationMatrix();
+//
+//      // TODO(sharmin) check it
+//      // Add sonar landmark (in world frame) to the graph
+//      for (okvis::SonarMeasurementDeque::const_iterator it = sonarData.begin(); it != sonarData.end(); ++it) {
+//        double range = it->measurement.range;
+//        double heading = it->measurement.heading;
+//        uint64_t lmId = okvis::IdProvider::instance().newId();
+//
+//        okvis::kinematics::Transformation sonar_point(Eigen::Vector3d(range * cos(heading), range * sin(heading), 0.0),
+//                                                      Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+//        okvis::kinematics::Transformation T_WSo_point = T_WSo * sonar_point;
+//
+//        Eigen::Vector3d sonar_landmark = T_WSo_point.r();
+//
+//        {
+//          std::lock_guard<std::mutex> l(estimator_mutex_);
+//          estimator_.addSonarLandmark(lmId,
+//                                      Eigen::Vector4d(sonar_landmark[0], sonar_landmark[1], sonar_landmark[2], 1.0));
+//        }
+//      }
+//    }
 
     // -- get relevant imu messages for new state
     okvis::Time imuDataEndTime = multiFrame->timestamp() + temporal_imu_data_overlap;
@@ -751,6 +810,12 @@ void ThreadedKFVio::frameConsumerLoop(size_t cameraIndex) {
           imuData, parameters_.imu, T_WS, speedAndBiases, lastTimestamp, multiFrame->timestamp());
       propagationTimer.stop();
     }
+
+    // Forward Sonar
+    if (parameters_.sensorList.isForwardSonarUsed) {
+       /// To do
+    }
+
     okvis::kinematics::Transformation T_WC = T_WS * (*parameters_.nCameraSystem.T_SC(frame->sensorId));
     beforeDetectTimer.stop();
     detectTimer.start();
@@ -856,6 +921,49 @@ void ThreadedKFVio::matchingLoop() {
       // no measurements in timeframe, should not happen, as we waited for measurements
       if (sonarData.size() == 0) continue;
     }
+
+    // @ShuPan
+    // Forward Sonar Data
+    okvis::ForwardSonarMeasurement forwardsonarData;
+    if (parameters_.sensorList.isForwardSonarUsed) {
+      // -- get relevant sonar messages for new state
+      okvis::Time forwardsonarDataTime = frame->timestamp();
+      if (estimator_.numFrames() < 2)
+        keyforwardsonarFrameTime_ = lastforwardsonartime_;
+      else
+      {
+//         for (size_t age = 1; age < estimator_.numFrames(); ++age) {
+//            uint64_t olderFrameId = estimator_.frameIdByAge(age);
+//            if (!estimator_.isKeyframe(olderFrameId)) continue;
+//            lastforwardsonarFrameTime = estimator_.timestamp(olderFrameId);
+////            LOG(INFO) << "***********lastforwardsonarFrameTime: " << lastforwardsonarFrameTime << " id: " << olderFrameId;
+            estimator_.get_T_WS(keyFrameId_, T_WSLast_);
+//            break;
+//         }
+      }
+//      LOG(INFO) << "forwardsonarDataTime: " << forwardsonarDataTime << " keyforwardsonarFrameTime_: " << keyforwardsonarFrameTime_;
+//      estimator_.addSonarParaments(sonar_resolution, T_WSLast_);
+      OKVIS_ASSERT_TRUE_DBG(
+          Exception, lastforwardsonarFrameTime < forwardsonarDataTime, "sonar data end time is smaller than begin time.");
+      // wait until all relevant sonar messages have arrived and check for termination request
+      if (sonarFrameSynchronizer_.waitForUpToDateSonarData(okvis::Time(forwardsonarDataTime)) == false) {
+        return;
+      }
+      OKVIS_ASSERT_TRUE_DBG(Exception,
+                            sonarDataEndTime < sonarMeasurements_.back().timeStamp,
+                            "Waiting for up to date sonar data seems to have failed!");
+//      forwardsonarData = getForwardSonarMeasurements(forwardsonarDataBeginTime, forwardsonarDataEndTime);
+      forwardsonarData = getSingleForwardSonarMeasurements(forwardsonarDataTime);
+//      imshow("forwardsonarData", forwardsonarData.measurement.image);
+      if(lastfsonarDTime_ != keyforwardsonarFrameTime_)
+            lastforwardsonarData = getSingleForwardSonarMeasurements(keyforwardsonarFrameTime_);
+//      LOG(INFO) << "fData Size: " << forwardsonarData.measurement.keypoints.size() << " lData Size: " << lastforwardsonarData.measurement.keypoints.size();
+//      imshow("lastforwardsonarData", lastforwardsonarData.measurement.image);
+      // prepareToAddStateTimer.stop();
+      // if sonar_data is empty, either end_time > begin_time or
+      // no measurements in timeframe, should not happen, as we waited for measurements
+      lastfsonarDTime_ = keyforwardsonarFrameTime_;
+    }
     // Depth data
     okvis::DepthMeasurementDeque depthData;
     if (parameters_.sensorList.isDepthUsed) {
@@ -898,8 +1006,11 @@ void ThreadedKFVio::matchingLoop() {
       addStateTimer.start();
       okvis::Time t0Matching = okvis::Time::now();
       bool asKeyframe = false;
+      bool asKeySonarframe = false;
+      uint64_t stateId = 0;
+//      LOG(INFO) << "************Ready to addState: " << frame->timestamp() << " id: " << frame->id();
       // @Sharmin
-      if (estimator_.addStates(frame, imuData, parameters_, sonarData, depthData, firstDepth_, asKeyframe)) {
+      if (estimator_.addStates(frame, imuData, parameters_, lastforwardsonarData, forwardsonarData, depthData, firstDepth_, asKeyframe, T_WSLast_, sonar_resolution)) {
         lastAddedStateTimestamp_ = frame->timestamp();
         addStateTimer.stop();
       } else {
@@ -912,9 +1023,18 @@ void ThreadedKFVio::matchingLoop() {
       okvis::kinematics::Transformation T_WS;
       estimator_.get_T_WS(frame->id(), T_WS);
       matchingTimer.start();
-      frontend_.dataAssociationAndInitialization(estimator_, T_WS, parameters_, map_, frame, &asKeyframe);
+      frontend_.dataAssociationAndInitialization(estimator_, T_WS, parameters_, map_, frame, &asKeyframe, &asKeySonarframe);
       matchingTimer.stop();
-      if (asKeyframe) estimator_.setKeyframe(frame->id(), asKeyframe);
+
+      if (asKeyframe)
+      {
+         estimator_.setKeyframe(frame->id(), asKeyframe);
+         if (parameters_.sensorList.isForwardSonarUsed) {
+             keyforwardsonarFrameTime_ = frame->timestamp();
+             keyFrameId_ = frame->id();
+         }
+      }
+//      if (asKeySonarframe) estimator_.setKeySonarframe(frame->id(), asKeySonarframe);
       if (!blocking_) {
         double timeLimit =
             parameters_.optimization.timeLimitForMatchingAndOptimization - (okvis::Time::now() - t0Matching).toSec();
@@ -1083,6 +1203,79 @@ void ThreadedKFVio::sonarConsumerLoop() {
     sonarFrameSynchronizer_.gotSonarData(data.timeStamp);
 
     processSonarTimer.stop();
+  }
+}
+
+// ShuPan
+// Loop to process forward sonar measurements.
+void ThreadedKFVio::forwardsonarConsumerLoop() {
+  okvis::ForwardSonarMeasurement data;
+  okvis::ForwardSonarMeasurement fsonardata;
+  TimerSwitchable processforwardSonarTimer("0 processforwardSonarMeasurements", true);
+  for (;;) {
+    // get data and check for termination request
+    if (ForwardsonarMeasurementsReceived_.PopBlocking(&data) == false) return;
+    processforwardSonarTimer.start();
+    okvis::Time start;
+    cv::Mat sonarImage_copy = data.measurement.image.clone();
+    const okvis::Time* end;  // do not need to copy end timestamp
+    {
+      std::lock_guard<std::mutex> forwardsonarLock(forwardsonarMeasurements_mutex_);
+      OKVIS_ASSERT_TRUE(Exception,
+                        forwardsonarMeasurements_.empty() || forwardsonarMeasurements_.back().timeStamp < data.timeStamp,
+                        "Sonar measurement from the past received");
+      if (forwardsonarMeasurements_.size() > 0)
+      {
+        start = forwardsonarMeasurements_.back().timeStamp;
+        cv::Mat sonarImage = data.measurement.image;
+        cv::cvtColor(sonarImage, sonarImage, cv::COLOR_BGR2GRAY);
+        medianBlur(sonarImage, sonarImage, 3);
+        Ptr<AKAZE> detector = AKAZE::create();
+        std::vector<cv::KeyPoint> obj_keypoints;
+        Mat obj_descriptor;
+        if(iskeysonarFrame == false)
+        {
+            sonarKeyFrameTime_ = data.timeStamp;
+//            KeySonarFrame = sonarImage.clone();
+//            keyframe_copy = KeySonarFrame.clone();
+            iskeysonarFrame = true;
+            detector->detectAndCompute(sonarImage, Mat(), obj_keypoints, obj_descriptor);
+            fsonardata.timeStamp = data.timeStamp;
+//            fsonardata.measurement.image = sonarImage.clone();
+            fsonardata.measurement.image = sonarImage;
+            fsonardata.measurement.keypoints = obj_keypoints;
+            fsonardata.measurement.descriptors = obj_descriptor;
+            fsonardata.measurement.keyframetime = sonarKeyFrameTime_;
+        }
+        else
+        {
+            std::vector<cv::KeyPoint> scene_keypoints;
+            cv::Mat scene_descriptor;
+//            Ptr<AKAZE> detector = AKAZE::create();
+//            detector->detectAndCompute(KeySonarFrame, Mat(), obj_keypoints, obj_descriptor);
+            detector->detectAndCompute(sonarImage, Mat(), scene_keypoints, scene_descriptor);
+            fsonardata.timeStamp = data.timeStamp;
+//            fsonardata.measurement.image = sonarImage.clone();
+            fsonardata.measurement.image = sonarImage;
+            fsonardata.measurement.keypoints = scene_keypoints;
+            fsonardata.measurement.descriptors = scene_descriptor;
+         }
+//         imshow("forwardsonarConsumerLoop", fsonardata.measurement.image);
+      }
+      else
+        start = okvis::Time(0, 0);
+      end = &data.timeStamp;
+      if(forwardsonarMeasurements_.size() >= max_sonar_input_queue_size)
+      {
+          forwardsonarMeasurements_.pop_front();
+      }
+      forwardsonarMeasurements_.push_back(fsonardata);
+    }  // unlock sonarMeasurements_mutex_
+
+    // notify other threads that sonar data with timeStamp is here.
+    sonarFrameSynchronizer_.gotSonarData(data.timeStamp);
+
+    processforwardSonarTimer.stop();
   }
 }
 
@@ -1281,6 +1474,62 @@ okvis::SonarMeasurementDeque ThreadedKFVio::getSonarMeasurements(okvis::Time& so
   return okvis::SonarMeasurementDeque(first_sonar_package, last_sonar_package);
 }
 
+// @ShuPan
+// Get a subset of the recorded Forward Sonar measurements.
+okvis::ForwardSonarMeasurementDeque ThreadedKFVio::getForwardSonarMeasurements(okvis::Time& forwardsonarDataBeginTime,
+                                                                        okvis::Time& forwardsonarDataEndTime) {
+  // sanity checks:
+  // if end time is smaller than begin time, return empty queue.
+  // if begin time is larger than newest sonar time, return empty queue.
+  if (forwardsonarDataEndTime < forwardsonarDataBeginTime || forwardsonarDataBeginTime > forwardsonarMeasurements_.back().timeStamp)
+    return okvis::ForwardSonarMeasurementDeque();
+
+  std::lock_guard<std::mutex> lock(forwardsonarMeasurements_mutex_);
+  // get iterator to sonar data before previous frame
+  okvis::ForwardSonarMeasurementDeque::iterator first_sonar_package = forwardsonarMeasurements_.begin();
+  okvis::ForwardSonarMeasurementDeque::iterator last_sonar_package = forwardsonarMeasurements_.end();
+  // TODO(sharmin) go backwards through queue. Is probably faster.
+  for (auto iter = forwardsonarMeasurements_.begin(); iter != forwardsonarMeasurements_.end(); ++iter) {
+    // move first_sonar_package iterator back until iter->timeStamp is higher than requested begintime
+    if (iter->timeStamp <= forwardsonarDataBeginTime) first_sonar_package = iter;
+
+    // set last_sonar_package iterator as soon as we hit first timeStamp higher than requested endtime & break
+    if (iter->timeStamp >= forwardsonarDataEndTime) {
+      last_sonar_package = iter;
+      // since we want to include this last sonar measurement in returned Deque we
+      // increase last_sonar_package iterator once.
+//      ++last_sonar_package;
+      break;
+    }
+  }
+
+  // create copy of sonar buffer
+  return okvis::ForwardSonarMeasurementDeque(first_sonar_package, last_sonar_package);
+}
+
+okvis::ForwardSonarMeasurement ThreadedKFVio::getSingleForwardSonarMeasurements(okvis::Time& forwardsonarDataTime) {
+  // sanity checks:
+  // if end time is smaller than begin time, return empty queue.
+  // if begin time is larger than newest sonar time, return empty queue.
+
+  std::lock_guard<std::mutex> lock(forwardsonarMeasurements_mutex_);
+  // get iterator to sonar data before previous frame
+  okvis::ForwardSonarMeasurement sonar_package;
+  // TODO(sharmin) go backwards through queue. Is probably faster.
+  for (auto iter = forwardsonarMeasurements_.begin(); iter != forwardsonarMeasurements_.end(); ++iter) {
+    // move first_sonar_package iterator back until iter->timeStamp is higher than requested begintime
+    if (iter->timeStamp <= forwardsonarDataTime)
+    {
+         sonar_package = *iter;
+    }
+    else
+      break;
+  }
+
+  // create copy of sonar buffer
+  return sonar_package;
+}
+
 // Remove IMU measurements from the internal buffer.
 int ThreadedKFVio::deleteImuMeasurements(const okvis::Time& eraseUntil) {
   std::lock_guard<std::mutex> lock(imuMeasurements_mutex_);
@@ -1314,9 +1563,9 @@ void ThreadedKFVio::optimizationLoop() {
     {
       std::lock_guard<std::mutex> l(estimator_mutex_);
       optimizationTimer.start();
-      // if(frontend_.isInitialized()){
-      estimator_.optimize(parameters_.optimization.max_iterations, 2, false);
-      //}
+//       if(frontend_.isInitialized()){
+      estimator_.optimize(parameters_.optimization.max_iterations, 4, false);
+//      }
       /*if (estimator_.numFrames() > 0 && !frontend_.isInitialized()){
         // undo translation
         for(size_t n=0; n<estimator_.numFrames(); ++n){

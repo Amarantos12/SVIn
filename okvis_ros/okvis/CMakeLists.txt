@@ -145,10 +145,12 @@ if(${USE_SYSTEM_CERES})
   include_directories(BEFORE ${CERES_INCLUDE_DIRS})
   message(STATUS "Using system Ceres.")
 else()
-  set(CERES_VERSION 1.14.0)
-  set(CERES_TAG aeebc66bd8ff5db65b852dac0cbac28f618ac5d8) #version 1.14
+  set(CERES_VERSION 2.0.0)
+  #set(CERES_TAG aeebc66bd8ff5db65b852dac0cbac28f618ac5d8) #version 1.14
+  set(CERES_TAG 0ffb6db49cec52566f53ab66be7a19970ddc562b)
   ExternalProject_Add(ceres_external
-    GIT_REPOSITORY https://ceres-solver.googlesource.com/ceres-solver
+    #GIT_REPOSITORY https://ceres-solver.googlesource.com/ceres-solver
+    GIT_REPOSITORY  http://github.com/ceres-solver/ceres-solver.git
     GIT_TAG ${CERES_TAG}
     UPDATE_COMMAND ""
     INSTALL_DIR ${CMAKE_BINARY_DIR}

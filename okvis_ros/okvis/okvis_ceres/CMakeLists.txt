@@ -23,6 +23,8 @@ add_library(${PROJECT_NAME}
   src/MarginalizationError.cpp
   src/HomogeneousPointError.cpp
   src/SonarError.cpp  # @Sharmin
+  #src/ForwardSonarError.cpp  # @ShuPan
+  #src/ForwardSonarErrorAutodiff.cpp  # @ShuPan
   src/DepthError.cpp  # @Sharmin
   src/Estimator.cpp
   src/LocalParamizationAdditionalInterfaces.cpp

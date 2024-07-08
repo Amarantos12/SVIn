@@ -178,6 +178,23 @@ struct CameraData {
   std::vector<cv::KeyPoint> keypoints;  ///< Keypoints if available.
   bool deliversKeypoints;               ///< Are the keypoints delivered too?
 };
+
+// @shupan
+struct FowardSonarData {
+    cv::Mat image;                                  ///< Image.
+    double range;                                   /// sonar max range.
+    double resolution;                              /// sonar resolution/
+    cv::Mat descriptors;
+    std::vector<Eigen::Vector3d> matchpoints;     /// sonar matched keypoints
+    std::vector<cv::KeyPoint> keypoints;            ///< Keypoints if available.
+    bool deliversKeypoints;                         ///< Are the keypoints delivered too?
+    okvis::Time keyframetime;
+};
+
+struct KeyForwardSonarDate {
+    okvis::Time keyframetime;
+    okvis::kinematics::Transformation T_WKF;
+};
 /// \brief Keypoint measurement.
 struct KeypointData {
   std::vector<cv::KeyPoint> keypoints;         ///< Keypoints.
@@ -193,6 +210,12 @@ struct FrameData {
 typedef Measurement<CameraData> CameraMeasurement;
 typedef Measurement<FrameData> FrameMeasurement;
 typedef Measurement<DepthCameraData> DepthCameraMeasurement;
+
+typedef Measurement<FowardSonarData> ForwardSonarMeasurement;
+typedef std::deque<ForwardSonarMeasurement, Eigen::aligned_allocator<ForwardSonarMeasurement> > ForwardSonarMeasurementDeque;  /// @ShuPan
+
+typedef Measurement<KeyForwardSonarDate> KeyForwardSonarMeasurement;
+typedef std::deque<KeyForwardSonarMeasurement, Eigen::aligned_allocator<KeyForwardSonarMeasurement> > KeyForwardSonarMeasurementDeque;  /// @ShuPan
 
 typedef Measurement<RelocReading> RelocMeasurement;                                                       /// @Sharmin
 typedef std::deque<RelocMeasurement, Eigen::aligned_allocator<RelocMeasurement> > RelocMeasurementDeque;  /// @Sharmin

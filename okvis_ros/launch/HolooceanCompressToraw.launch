@@ -1,0 +1,20 @@
+<launch>
+
+<!-- <arg name="config_path" default="~/catkin_ws/src/VINS-Fusion/config/euroc/cbluerov_stereo_imu_config.yaml" /> -->
+
+<!-- To un-compress image topics -->
+  <node name="republish1" type="republish" pkg="image_transport" output="screen"
+    args="compressed in:=/holoocean/compressed_left raw out:=/holoocean/left_image" />
+  <node name="republish2" type="republish" pkg="image_transport" output="screen"
+    args="compressed in:=/holoocean/compressed_right raw out:=/holoocean/right_image" />
+
+<!--    --><!-- Run pose_graph node--> -->
+<!--   <node name="vins_node" pkg="vins" type="vins_node" output="screen"> -->
+<!--     <param name=" config_file" type="string" value="$(arg config_path)" /> -->
+
+<!--    --><!-- Run pose_graph node--> -->
+<!--   <node name="loop_fusion_node" pkg="loop_fusion" type="loop_fusion_node" output="screen"> -->
+<!--     <param name=" config_file" type="string" value="$(arg config_path)" /> -->
+<!--   </node> -->
+
+</launch>

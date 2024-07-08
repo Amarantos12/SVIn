@@ -55,9 +55,13 @@
 #include <okvis/ceres/PoseParameterBlock.hpp>
 #include <okvis/ceres/RelativePoseError.hpp>
 #include <okvis/ceres/SonarError.hpp>  // @Sharmin
+//#include <okvis/ceres/ForwardSonarError.hpp>  // @Shu Pan
+#include <okvis/ceres/ForwardSonarErrorAutodiff.hpp>
 #include <okvis/ceres/SpeedAndBiasError.hpp>
 #include <utility>
 #include <vector>
+
+#define pi 3.1415926535898
 
 /// \brief okvis Main namespace of this package.
 namespace okvis {
@@ -102,19 +106,364 @@ void Estimator::clearCameras() { extrinsicsEstimationParametersVec_.clear(); }
 // Remove all IMUs from the configuration.
 void Estimator::clearImus() { imuParametersVec_.clear(); }
 
+void Estimator::forwardsonarMatchW3D(const okvis::ForwardSonarMeasurement& keyforwardsonarMeasurements,
+                                     const okvis::ForwardSonarMeasurement& forwardsonarMeasurements,
+                                     const okvis::VioParameters& params,
+                                     const okvis::kinematics::Transformation& T_WS,
+                                     const okvis::kinematics::Transformation& T_WSlast,
+                                     std::vector<Eigen::Vector3d>& lastpts,
+                                     std::vector<Eigen::Vector3d>& curpts)
+{
+      std::vector<cv::KeyPoint> last_keypoints = keyforwardsonarMeasurements.measurement.keypoints;
+      std::vector<cv::KeyPoint> cur_keypoints = forwardsonarMeasurements.measurement.keypoints;
+      cv::Mat lastImage = keyforwardsonarMeasurements.measurement.image.clone();
+      cv::Mat curImage = forwardsonarMeasurements.measurement.image.clone();
+      cv::Mat last_descriptors = keyforwardsonarMeasurements.measurement.descriptors;
+      cv::Mat cur_descriptors = forwardsonarMeasurements.measurement.descriptors;
+      double orign_x = curImage.cols / 2;
+      double orign_y = curImage.rows;
+       // matching
+      BFMatcher matcher(NORM_L2);
+      std::vector<DMatch> matches;
+      matcher.match(last_descriptors, cur_descriptors, matches);
+
+      // good matches
+      std::vector<DMatch> goodMatches;
+      double minDist = 10000, maxDist = 0;
+      for (size_t i = 0; i < matches.size(); i++)
+      {
+         double dist = matches[i].distance;
+         if (dist < minDist)
+              minDist = dist;
+         if (dist > maxDist)
+              maxDist = dist;
+      }
+      for (size_t i = 0; i < matches.size(); i++)
+      {
+         double dist = matches[i].distance;
+         if (dist < max(2.5 * minDist, 0.02))
+              goodMatches.push_back(matches[i]);
+      }
+
+      std::vector<Point2f> obj;
+      std::vector<Point2f> scene;
+      for( unsigned int i = 0; i < goodMatches.size(); i++ )
+      {
+         obj.push_back( last_keypoints[ goodMatches[i].queryIdx ].pt );
+         scene.push_back( cur_keypoints[ goodMatches[i].trainIdx ].pt );
+      }
+      std::vector<unsigned char> listpoints;
+      std::vector<DMatch> RansacMatches;
+      if((obj.size() >= 4) || (scene.size() >= 4))
+      {
+         Mat H = findHomography( obj, scene, RANSAC, 3, listpoints);//计算透视变换
+         for (int i = 0; i < listpoints.size();i++)
+         {
+            if ((int)listpoints[i])
+            {
+               RansacMatches.push_back(goodMatches[i]);
+            }
+         }
+//         imshow("lastImage", lastImage);
+//         imshow("curImage", curImage);
+//         cv::Mat ransacMatchesImage;
+//         drawMatches(lastImage, last_keypoints, curImage, cur_keypoints, RansacMatches, ransacMatchesImage,\
+//            Scalar::all(-1), Scalar::all(-1), vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
+//         cv::imshow("ransacMatchesImage", ransacMatchesImage);
+//                waitKey(1);
+      }
+      LOG(INFO) << "RansacMatches size: " << RansacMatches.size();
+      if(RansacMatches.size() >= 10)
+      {
+          okvis::kinematics::Transformation T_WSo = T_WS * params.sonar.T_SSo;
+          okvis::kinematics::Transformation T_WSoL = T_WSlast * params.sonar.T_SSo;
+          for(int i = 0; i < RansacMatches.size(); i++)
+          {
+                double angle;
+                double range;
+                if (last_keypoints[RansacMatches[i].queryIdx].pt.x <= orign_x)
+                {
+                     double y = orign_y - last_keypoints[RansacMatches[i].queryIdx].pt.y;
+                     double x = orign_x - last_keypoints[RansacMatches[i].queryIdx].pt.x;
+                     double angle = -1 * (pi / 2 - atan2(y, x));    // sonar angle is 90 - angle
+                     double r = sqrt(pow(x, 2) + pow(y, 2));
+                     double range = r * resolution_;
+                     okvis::kinematics::Transformation sonar_p1(Eigen::Vector3d(range * sin(angle), 0, range * cos(angle)),
+                                                                Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+                     okvis::kinematics::Transformation T_WSo_p1 = T_WSoL * sonar_p1;
+                     Eigen::Vector3d WSp1 = T_WSo_p1.r();
+                     lastpts.push_back(WSp1);
+                }
+                else
+                {
+                     double y = orign_y - last_keypoints[RansacMatches[i].queryIdx].pt.y;;
+                     double x = last_keypoints[RansacMatches[i].queryIdx].pt.x - orign_x;
+                     double angle = (pi / 2 - atan2(y, x));
+                     double r = sqrt(pow(x, 2) + pow(y, 2));
+                     double range = r * resolution_;
+                     okvis::kinematics::Transformation sonar_p1(Eigen::Vector3d(range * sin(angle), 0, range * cos(angle)),
+                                                                Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+                     okvis::kinematics::Transformation T_WSo_p1 = T_WSoL * sonar_p1;
+                     Eigen::Vector3d WSp1 = T_WSo_p1.r();
+                     lastpts.push_back(WSp1);
+                 }
+                if (cur_keypoints[RansacMatches[i].trainIdx].pt.x <= orign_x)
+                {
+                    double y = orign_y - cur_keypoints[RansacMatches[i].trainIdx].pt.y;
+                    double x = orign_x - cur_keypoints[RansacMatches[i].trainIdx].pt.x;
+                    angle = -1 * (pi / 2 - atan2(y, x));    // sonar angle is 90 - angle
+                    double r = sqrt(pow(x, 2) + pow(y, 2));
+                    range = r * resolution_;
+                    okvis::kinematics::Transformation sonar_p2(Eigen::Vector3d(range * sin(angle), 0, range * cos(angle)),
+                                                               Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+                    okvis::kinematics::Transformation T_WSo_p2 = T_WSo * sonar_p2;
+                    Eigen::Vector3d WSp2 = T_WSo_p2.r();
+                    curpts.push_back(WSp2);
+                }
+                else
+                {
+                    double y = orign_y - cur_keypoints[RansacMatches[i].trainIdx].pt.y;;
+                    double x = cur_keypoints[RansacMatches[i].trainIdx].pt.x - orign_x;
+                    angle = (pi / 2 - atan2(y, x));
+                    double r = sqrt(pow(x, 2) + pow(y, 2));
+                    range = r * resolution_;
+                    okvis::kinematics::Transformation sonar_p2(Eigen::Vector3d(range * sin(angle), 0, range * cos(angle)),
+                                                               Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+                    okvis::kinematics::Transformation T_WSo_p2 = T_WSo * sonar_p2;
+                    Eigen::Vector3d WSp2 = T_WSo_p2.r();
+                    curpts.push_back(WSp2);
+                }
+          }
+      }
+}
+
+void Estimator::drawVerticalMatches(const cv::Mat& image1, const std::vector<cv::KeyPoint>& keypoints1,
+                         const cv::Mat& image2, const std::vector<cv::KeyPoint>& keypoints2,
+                         const std::vector<cv::DMatch>& matches, cv::Mat& output)
+{
+    int rows1 = image1.rows;
+    int cols1 = image1.cols;
+    int rows2 = image2.rows;
+    int cols2 = image2.cols;
+
+    int outputRows = rows1 + rows2;
+    int outputCols = std::max(cols1, cols2);
+
+    output.create(outputRows, outputCols, CV_8UC3);
+    output.setTo(cv::Scalar(0, 0, 0));
+
+    cv::Mat roi1(output, cv::Rect(0, 0, cols1, rows1));
+    cv::Mat roi2(output, cv::Rect(0, rows1, cols2, rows2));
+
+    cv::cvtColor(image1, roi1, cv::COLOR_GRAY2BGR);
+    cv::cvtColor(image2, roi2, cv::COLOR_GRAY2BGR);
+
+    for (const cv::DMatch& match : matches)
+    {
+        const cv::KeyPoint& kp1 = keypoints1[match.queryIdx];
+        const cv::KeyPoint& kp2 = keypoints2[match.trainIdx];
+
+        cv::Point2f pt1(kp1.pt.x, kp1.pt.y);
+        cv::Point2f pt2(kp2.pt.x, kp2.pt.y + rows1);
+
+        cv::line(output, pt1, pt2, cv::Scalar(0, 255, 0), 1, cv::LINE_AA);
+        cv::circle(output, pt1, 2, cv::Scalar(255, 0, 0), cv::FILLED, cv::LINE_AA);
+        cv::circle(output, pt2, 2, cv::Scalar(0, 0, 255), cv::FILLED, cv::LINE_AA);
+    }
+}
+
+void Estimator::forwardsonarMatching(const okvis::ForwardSonarMeasurement& keyforwardsonarMeasurements,
+                                     const okvis::ForwardSonarMeasurement& forwardsonarMeasurements,
+                                     std::vector<Eigen::Vector3d>& lastpts,
+                                     std::vector<Eigen::Vector3d>& curpts)
+{
+      std::vector<cv::KeyPoint> last_keypoints = keyforwardsonarMeasurements.measurement.keypoints;
+      std::vector<cv::KeyPoint> cur_keypoints = forwardsonarMeasurements.measurement.keypoints;
+      cv::Mat lastImage = keyforwardsonarMeasurements.measurement.image.clone();
+      cv::Mat curImage = forwardsonarMeasurements.measurement.image.clone();
+      cv::Mat last_descriptors = keyforwardsonarMeasurements.measurement.descriptors;
+      cv::Mat cur_descriptors = forwardsonarMeasurements.measurement.descriptors;
+      double orign_x = curImage.cols / 2;
+      double orign_y = curImage.rows;
+       // matching
+      BFMatcher matcher(NORM_L2);
+      std::vector<DMatch> matches;
+      matcher.match(last_descriptors, cur_descriptors, matches);
+
+      // good matches
+      std::vector<DMatch> goodMatches;
+      double minDist = 10000, maxDist = 0;
+      for (size_t i = 0; i < matches.size(); i++)
+      {
+         double dist = matches[i].distance;
+         if (dist < minDist)
+              minDist = dist;
+         if (dist > maxDist)
+              maxDist = dist;
+      }
+      for (size_t i = 0; i < matches.size(); i++)
+      {
+         double dist = matches[i].distance;
+         if (dist < max(1.5 * minDist, 0.02))
+              goodMatches.push_back(matches[i]);
+      }
+//      LOG(INFO) << "!!!!!!!keypoints1: " << last_keypoints.size() << " keypoints2: " << cur_keypoints.size() << " matches: " << goodMatches.size();
+      std::vector<Point2f> obj;
+      std::vector<Point2f> scene;
+      for( unsigned int i = 0; i < goodMatches.size(); i++ )
+      {
+         obj.push_back( last_keypoints[ goodMatches[i].queryIdx ].pt );
+         scene.push_back( cur_keypoints[ goodMatches[i].trainIdx ].pt );
+      }
+      std::vector<unsigned char> listpoints;
+      std::vector<DMatch> RansacMatches;
+      if((obj.size() >= 4) || (scene.size() >= 4))
+      {
+         Mat H = findHomography( obj, scene, RANSAC, 3, listpoints);//计算透视变换
+         for (int i = 0; i < listpoints.size();i++)
+         {
+            if ((int)listpoints[i])
+            {
+               RansacMatches.push_back(goodMatches[i]);
+            }
+         }
+//         imshow("lastImage", lastImage);
+//         imshow("curImage", curImage);
+         if(RansacMatches.size() <= 100)
+         {
+             cv::Mat ransacMatchesImage;
+             drawMatches(lastImage, last_keypoints, curImage, cur_keypoints, RansacMatches, ransacMatchesImage,\
+                Scalar(0, 255, 0), Scalar::all(-1), vector<char>(), DrawMatchesFlags::NOT_DRAW_SINGLE_POINTS);
+    //         drawVerticalMatches(lastImage, last_keypoints, curImage, cur_keypoints, RansacMatches, ransacMatchesImage);
+             cv::imshow("ransacMatchesImage", ransacMatchesImage);
+    //                waitKey(1);
+         }
+      }
+      LOG(INFO) << "RansacMatches size: " << RansacMatches.size();
+      if((RansacMatches.size() >= 8) && (RansacMatches.size() <= 80))
+      {
+          for(int i = 0; i < RansacMatches.size(); i++)
+          {
+                double angle;
+                double range;
+                if (last_keypoints[RansacMatches[i].queryIdx].pt.x <= orign_x)
+                {
+                     double y = orign_y - last_keypoints[RansacMatches[i].queryIdx].pt.y;
+                     double x = orign_x - last_keypoints[RansacMatches[i].queryIdx].pt.x;
+                     double angle = -1 * (pi / 2 - atan2(y, x));    // sonar angle is 90 - angle
+                     double r = sqrt(pow(x, 2) + pow(y, 2));
+                     double range = r * resolution_;
+                     Eigen::Vector3d WSp1(Eigen::Vector3d(range * sin(angle), 0, range * cos(angle)));
+                     lastpts.push_back(WSp1);
+                }
+                else
+                {
+                     double y = orign_y - last_keypoints[RansacMatches[i].queryIdx].pt.y;;
+                     double x = last_keypoints[RansacMatches[i].queryIdx].pt.x - orign_x;
+                     double angle = (pi / 2 - atan2(y, x));
+                     double r = sqrt(pow(x, 2) + pow(y, 2));
+                     double range = r * resolution_;
+                     Eigen::Vector3d WSp1(Eigen::Vector3d(range * sin(angle), 0, range * cos(angle)));
+                     lastpts.push_back(WSp1);
+                 }
+                if (cur_keypoints[RansacMatches[i].trainIdx].pt.x <= orign_x)
+                {
+                    double y = orign_y - cur_keypoints[RansacMatches[i].trainIdx].pt.y;
+                    double x = orign_x - cur_keypoints[RansacMatches[i].trainIdx].pt.x;
+                    angle = -1 * (pi / 2 - atan2(y, x));    // sonar angle is 90 - angle
+                    double r = sqrt(pow(x, 2) + pow(y, 2));
+                    range = r * resolution_;
+                    Eigen::Vector3d WSp2(Eigen::Vector3d(range * sin(angle), 0, range * cos(angle)));
+                    curpts.push_back(WSp2);
+                }
+                else
+                {
+                    double y = orign_y - cur_keypoints[RansacMatches[i].trainIdx].pt.y;;
+                    double x = cur_keypoints[RansacMatches[i].trainIdx].pt.x - orign_x;
+                    angle = (pi / 2 - atan2(y, x));
+                    double r = sqrt(pow(x, 2) + pow(y, 2));
+                    range = r * resolution_;
+                    Eigen::Vector3d WSp2(Eigen::Vector3d(range * sin(angle), 0, range * cos(angle)));
+                    curpts.push_back(WSp2);
+                }
+          }
+      }
+}
+
+void Estimator::sonar_pose_estimation(const std::vector<Eigen::Vector3d> &pts1,
+                                     const std::vector<Eigen::Vector3d> &pts2,
+                                     Eigen::Matrix3d &R, Eigen::Vector3d &t) {
+    Eigen::Vector3d p1(0,0,0);
+    Eigen::Vector3d p2(0,0,0);     // center of mass
+    int N = pts1.size();
+    for (int i = 0; i < N; i++) {
+        p1[0] += pts1[i][0];
+        p1[1] += pts1[i][1];
+        p1[2] += pts1[i][2];
+        p2[0] += pts2[i][0];
+        p2[1] += pts2[i][1];
+        p2[2] += pts2[i][2];
+    }
+    p1[0] = p1[0] / N;
+    p1[1] = p1[1] / N;
+    p1[2] = p1[2] / N;
+    p2[0] = p2[0] / N;
+    p2[1] = p2[1] / N;
+    p2[2] = p2[2] / N;
+    std::vector<Eigen::Vector3d> q1, q2; // remove the center
+    q1.resize(N);
+    q2.resize(N);
+    for (int i = 0; i < N; i++) {
+        q1[i][0] = pts1[i][0] - p1[0];
+        q1[i][1] = pts1[i][1] - p1[1];
+        q1[i][2] = pts1[i][2] - p1[2];
+        q2[i][0] = pts2[i][0] - p2[0];
+        q2[i][1] = pts2[i][1] - p2[1];
+        q2[i][2] = pts2[i][2] - p2[2];
+    }
+
+    // compute q1*q2^T
+    Eigen::Matrix3d W = Eigen::Matrix3d::Zero();
+    for (int i = 0; i < N; i++) {
+        W += Eigen::Vector3d(q1[i][0], q1[i][1], q1[i][2]) * Eigen::Vector3d(q2[i][0], q2[i][1], q2[i][2]).transpose();
+    }
+//    cout << "W=" << W << endl;
+
+    // SVD on W
+    Eigen::JacobiSVD<Eigen::Matrix3d> svd(W, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    Eigen::Matrix3d U = svd.matrixU();
+    Eigen::Matrix3d V = svd.matrixV();
+
+//    cout << "U=" << U << endl;
+//    cout << "V=" << V << endl;
+
+    R = U * (V.transpose());
+    if (R.determinant() < 0) {
+        R = -R;
+    }
+    t = Eigen::Vector3d(p1[0], p1[1], p1[2]) - R * Eigen::Vector3d(p2[0], p2[1], p2[2]);
+}
+
 // Add a pose to the state.
 bool Estimator::addStates(okvis::MultiFramePtr multiFrame,
                           const okvis::ImuMeasurementDeque& imuMeasurements,
                           const okvis::VioParameters& params,                    /* @Sharmin */
-                          const okvis::SonarMeasurementDeque& sonarMeasurements, /* @Sharmin */
+                          const okvis::ForwardSonarMeasurement& keyforwardsonarMeasurements, /* @ShuPan */
+                          const okvis::ForwardSonarMeasurement& forwardsonarMeasurements, /* @ShuPan */
                           const okvis::DepthMeasurementDeque& depthMeasurements,
                           double firstDepth, /* @Sharmin */
-                          bool asKeyframe) {
+                          bool asKeyframe,
+                          okvis::kinematics::Transformation T_WSL,
+                          double sonar_resolution) {
   // Note Sharmin: this is for imu propagation no matter isScaleRefined_ is true/false.
   // TODO(Sharmin): Start actual optimization when isScaleRefined_ = true.
 
   okvis::kinematics::Transformation T_WS;
   okvis::SpeedAndBias speedAndBias;
+  std::vector<Eigen::Vector3d> lastpts;
+  std::vector<Eigen::Vector3d> curpts;
+  okvis::kinematics::Transformation T_So1_So2;
+  resolution_ = sonar_resolution;
   if (statesMap_.empty()) {
     // in case this is the first frame ever, let's initialize the pose:
     bool success0 = initPoseFromImu(imuMeasurements, T_WS);
@@ -140,6 +489,7 @@ bool Estimator::addStates(okvis::MultiFramePtr multiFrame,
     OKVIS_ASSERT_TRUE_DBG(
         Exception, mapPtr_->parameterBlockExists(T_WS_id), "this is an okvis bug. previous pose does not exist.");
     T_WS = std::static_pointer_cast<ceres::PoseParameterBlock>(mapPtr_->parameterBlockPtr(T_WS_id))->estimate();
+//    LOG(INFO) << "************Estimate time: " << statesMap_.at(T_WS_id).timestamp << " id: " << T_WS_id;
     // OKVIS_ASSERT_TRUE_DBG(
     //    Exception, speedAndBias_id,
     //    "this is an okvis bug. previous speedAndBias does not exist.");
@@ -155,6 +505,48 @@ bool Estimator::addStates(okvis::MultiFramePtr multiFrame,
     Eigen::Vector3d acc_doubleinteg;
     Eigen::Vector3d acc_integ;
     double Del_t;
+
+    if (params.sensorList.isForwardSonarUsed)
+    {
+//        LOG(INFO) << "numKeypoints(0): " << multiFrame->numKeypoints(0)  << " numKeypoints(1): " << multiFrame->numKeypoints(1) << " CameraMatchedSize_: " << CameraMatchedSize_;
+        LOG(INFO) <<" CameraMatchedSize_: " << CameraMatchedSize_;
+//        if(multiFrame->numKeypoints(0) < 200 && multiFrame->numKeypoints(1) < 200)
+//         {
+//              sonarOptimized_ = 1;
+//         }
+//         else if(multiFrame->numKeypoints(0) < 100 && multiFrame->numKeypoints(1) < 100)
+//         {
+//              sonarOptimized_ = 2;
+//         }
+//         else
+//             sonarOptimized_ = 0;
+         if((CameraMatchedSize_ < 20) && (CameraMatchedSize_ >= 8))
+         {
+              sonarOptimized_ = 1;
+         }
+         else if(CameraMatchedSize_ < 8)
+         {
+              sonarOptimized_ = 2;
+         }
+         else
+             sonarOptimized_ = 0;
+//         LOG(INFO) << "sonarOptimized_: " << sonarOptimized_;
+         forwardsonarMatching(keyforwardsonarMeasurements, forwardsonarMeasurements, lastpts, curpts);
+         Eigen::Matrix3d R;
+         Eigen::Vector3d t;
+         if(curpts.size() > 0)
+         {
+            sonar_pose_estimation(lastpts, curpts, R, t);
+            Eigen::Quaterniond q(R);
+            okvis::kinematics::Transformation T_S1S2(t, q);
+            T_S1_S2_ = T_S1S2;
+//            if(multiFrame->numKeypoints(0) > 100 && multiFrame->numKeypoints(1) > 100)
+//               T_WS = T_WS * params.sonar.T_SSo * T_S1S2 * params.sonar.T_SSo.inverse();
+//            else
+//            if(multiFrame->numKeypoints(0) < 100 && multiFrame->numKeypoints(1) < 100)
+//               T_WS = T_WSL * params.sonar.T_SSo * T_S1S2 * params.sonar.T_SSo.inverse();
+          }
+     }
 
     int numUsedImuMeasurements = ceres::ImuError::propagation(imuMeasurements,
                                                               imuParametersVec_.at(0),
@@ -180,7 +572,6 @@ bool Estimator::addStates(okvis::MultiFramePtr multiFrame,
 
   // create a states object:
   States states(asKeyframe, multiFrame->id(), multiFrame->timestamp());
-
   // Added by Sharmin
   stateCount_ = stateCount_ + 1;
   // LOG (INFO) << "No. of state created: "<< stateCount_;
@@ -228,6 +619,7 @@ bool Estimator::addStates(okvis::MultiFramePtr multiFrame,
       // use the same block...
       cameraInfos.at(CameraSensorStates::T_SCi).id =
           lastElementIterator->second.sensors.at(SensorStates::Camera).at(i).at(CameraSensorStates::T_SCi).id;
+//      LOG(INFO) << "!!!!!!!!!!!!!!!!!Camera extrinsicsEstimationParametersVec_ too low !!!!!!!!!!!!!";
     } else {
       const okvis::kinematics::Transformation T_SC = *multiFrame->T_SC(i);
       uint64_t id = IdProvider::instance().newId();
@@ -237,6 +629,7 @@ bool Estimator::addStates(okvis::MultiFramePtr multiFrame,
         return false;
       }
       cameraInfos.at(CameraSensorStates::T_SCi).id = id;
+      LOG(INFO) << "!!!!!!!!!!!!!!!!!Camera extrinsicsEstimationParametersVec_ normal !!!!!!!!!!!!!";
     }
     // update the states info
     statesMap_.rbegin()->second.sensors.at(SensorStates::Camera).push_back(cameraInfos);
@@ -277,58 +670,95 @@ bool Estimator::addStates(okvis::MultiFramePtr multiFrame,
     std::cout << "Residual block z: " << (*poseParameterBlock->parameters()) + 2 << std::endl;
   }
   // Sonar
-  std::vector<Eigen::Vector3d> landmarkSubset;
-  Eigen::Vector3d sonar_landmark;
-  double range = 0.0, heading = 0.0;
+//  std::vector<Eigen::Vector3d> landmarkSubset;
+//  Eigen::Vector3d sonar_landmark;
+//  double range = 0.0, heading = 0.0;
 
   // @Sharmin
-  if (sonarMeasurements.size() != 0) {
-    auto last_sonarMeasurement_it = sonarMeasurements.rbegin();
-
-    // Taking the nearest range value to the n+1 th frame
-    range = last_sonarMeasurement_it->measurement.range;
-    heading = last_sonarMeasurement_it->measurement.heading;
-
-    okvis::kinematics::Transformation T_WSo = T_WS * params.sonar.T_SSo;
-
-    okvis::kinematics::Transformation sonar_point(Eigen::Vector3d(range * cos(heading), range * sin(heading), 0.0),
-                                                  Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
-    okvis::kinematics::Transformation T_WSo_point = T_WSo * sonar_point;
-
-    sonar_landmark = T_WSo_point.r();
-    // std::cout << "T_WSo: " << T_WSo.r() << std::endl;
-    // std::cout << "T_WSo_point: " << sonar_landmark << std::endl;
-
-    // may be the reverse searching is faster
-    for (PointMap::const_reverse_iterator rit = landmarksMap_.rbegin(); rit != landmarksMap_.rend(); ++rit) {
-      Eigen::Vector3d visual_landmark;
-      if (fabs(rit->second.point[3]) > 1.0e-8) {
-        visual_landmark = (rit->second.point / rit->second.point[3]).head<3>();
-        // LOG (INFO) << "Visual Landmark: " << visual_landmark;
-      }
-      // double distance_from_sonar = (sonar_landmark - visual_landmark).norm();  //Euclidean distance
-      if (fabs(sonar_landmark[0] - visual_landmark[0]) < 0.1 && fabs(sonar_landmark[1] - visual_landmark[1]) < 0.1 &&
-          fabs(sonar_landmark[2] - visual_landmark[2]) < 0.1) {
-        // TODO(sharmin) parameter!!
-        // searching around 10 cm of sonar landmark
-
-        landmarkSubset.push_back(visual_landmark);
-      }
-    }
-
-    // std::cout << "Size of visual patch: "<<landmarkSubset.size() << std::endl;
-
-    if (landmarkSubset.size() > 0) {
-      // LOG (INFO) << " Sonar added for ceres optimization";
-      // @Sharmin
-      // add sonarError and related addResidualBlock
-      double information_sonar = 1.0;  // TODO(sharmin) calculate properly?
-
-      std::shared_ptr<ceres::SonarError> sonarError(
-          new ceres::SonarError(params, range, heading, information_sonar, landmarkSubset));
-      mapPtr_->addResidualBlock(sonarError, NULL, poseParameterBlock);
-    }
-    // End @Sharmin
+//  if (sonarMeasurements.size() != 0) {
+//    auto last_sonarMeasurement_it = sonarMeasurements.rbegin();
+//
+//    // Taking the nearest range value to the n+1 th frame
+//    range = last_sonarMeasurement_it->measurement.range;
+//    heading = last_sonarMeasurement_it->measurement.heading;
+//
+//    okvis::kinematics::Transformation T_WSo = T_WS * params.sonar.T_SSo;
+//
+//    okvis::kinematics::Transformation sonar_point(Eigen::Vector3d(range * cos(heading), range * sin(heading), 0.0),
+//                                                  Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+//    okvis::kinematics::Transformation T_WSo_point = T_WSo * sonar_point;
+//
+//    sonar_landmark = T_WSo_point.r();
+//    // std::cout << "T_WSo: " << T_WSo.r() << std::endl;
+//    // std::cout << "T_WSo_point: " << sonar_landmark << std::endl;
+//
+//    // may be the reverse searching is faster
+//    for (PointMap::const_reverse_iterator rit = landmarksMap_.rbegin(); rit != landmarksMap_.rend(); ++rit) {
+//      Eigen::Vector3d visual_landmark;
+//      if (fabs(rit->second.point[3]) > 1.0e-8) {
+//        visual_landmark = (rit->second.point / rit->second.point[3]).head<3>();
+//        // LOG (INFO) << "Visual Landmark: " << visual_landmark;
+//      }
+//      // double distance_from_sonar = (sonar_landmark - visual_landmark).norm();  //Euclidean distance
+//      if (fabs(sonar_landmark[0] - visual_landmark[0]) < 0.1 && fabs(sonar_landmark[1] - visual_landmark[1]) < 0.1 &&
+//          fabs(sonar_landmark[2] - visual_landmark[2]) < 0.1) {
+//        // TODO(sharmin) parameter!!
+//        // searching around 10 cm of sonar landmark
+//
+//        landmarkSubset.push_back(visual_landmark);
+//      }
+//    }
+//
+//    // std::cout << "Size of visual patch: "<<landmarkSubset.size() << std::endl;
+//
+//    if (landmarkSubset.size() > 0) {
+//      // LOG (INFO) << " Sonar added for ceres optimization";
+//      // @Sharmin
+//      // add sonarError and related addResidualBlock
+//      double information_sonar = 1.0;  // TODO(sharmin) calculate properly?
+//
+//          std::shared_ptr<ceres::SonarError> sonarError(
+//              new ceres::SonarError(params, range, heading, information_sonar, landmarkSubset));
+//          mapPtr_->addResidualBlock(sonarError, NULL, poseParameterBlock);
+//        }
+//        // End @Sharmin
+//  }
+    forwardsonarFramePtrMap_.insert(std::pair<uint64_t, okvis::ForwardSonarMeasurement>(states.id, forwardsonarMeasurements));
+//    if ((forwardsonarMeasurements.measurement.keypoints.size() != 0) &&
+//        (keyforwardsonarMeasurements.measurement.keypoints.size() != 0)) {
+   if (curpts.size() > 0) {
+//            Eigen::Vector3d sp1(0,0,0);
+//            Eigen::Vector3d sp2(0,0,0);     // center of mass
+//            int N = curpts.size();
+//            for (int i = 0; i < N; i++) {
+//                sp1[0] += lastpts[i][0];
+//                sp1[1] += lastpts[i][1];
+//                sp1[2] += lastpts[i][2];
+//                sp2[0] += curpts[i][0];
+//                sp2[1] += curpts[i][1];
+//                sp2[2] += curpts[i][2];
+//             }
+//             sp1[0] = sp1[0] / N;
+//             sp1[1] = sp1[1] / N;
+//             sp1[2] = sp1[2] / N;
+//             sp2[0] = sp2[0] / N;
+//             sp2[1] = sp2[1] / N;
+//             sp2[2] = sp2[2] / N;
+//          for(int i = 0; i < curpts.size(); i++)
+//          {
+           double information_forwardsonar = 1.0;   // subsea 8
+           if(sonarOptimized_ == 0)
+                information_forwardsonar = 1.0;    // subsea 90
+           if(sonarOptimized_ == 1)
+                information_forwardsonar = 5.0;    // subsea 90
+           if(sonarOptimized_ == 2)
+                information_forwardsonar = 9.0;    // subsea 90
+           LOG(INFO) << "information_forwardsonar: " << information_forwardsonar;
+//           std::shared_ptr<ceres::SonarError> forwardsonarError(
+//                    new ceres::SonarError(params, information_forwardsonar, sp1, sp2, T_WSL, T_S1_S2_));
+           std::shared_ptr<ceres::SonarError> forwardsonarError(
+                    new ceres::SonarError(params, information_forwardsonar, T_WSL, T_S1_S2_));
+           mapPtr_->addResidualBlock(forwardsonarError, NULL, poseParameterBlock);
   }
 
   // depending on whether or not this is the very beginning, we will add priors or relative terms to the last state:
@@ -428,15 +858,70 @@ bool Estimator::addStates(okvis::MultiFramePtr multiFrame,
   return true;
 }
 
+//// @Sharmin
+//// Add a sonar landmark.
+//// TODO(sharmin) check whether it's okvis::ceres::Map::Sonar or okvis::ceres::Map::HomogeneousPoint
+//bool Estimator::addSonarLandmark(uint64_t landmarkId, const Eigen::Vector4d& landmark) {
+//  std::shared_ptr<okvis::ceres::HomogeneousPointParameterBlock> pointParameterBlock(
+//      new okvis::ceres::HomogeneousPointParameterBlock(landmark, landmarkId));
+//  if (!mapPtr_->addParameterBlock(pointParameterBlock, okvis::ceres::Map::HomogeneousPoint)) {
+//    return false;
+//  }
+//
+//  /*std::shared_ptr<okvis::ceres::SonarParameterBlock> pointParameterBlock(
+//      new okvis::ceres::SonarParameterBlock(landmark, landmarkId));
+//  if (!mapPtr_->addParameterBlock(pointParameterBlock,
+//                                  okvis::ceres::Map::Sonar)) {
+//    return false;
+//  }*/
+//
+//  /*Eigen::Matrix<double,3,3> information = Eigen::Matrix<double,3,3>::Zero();
+//          information(0,0) = 1.0; information(1,1) = 1.0; information(2,2) = 1.0;
+//  // TODO(Sharmin): check Runtime error, parameterBlockExists = false
+//  std::shared_ptr<ceres::SonarError > sonarError(
+//                        new ceres::SonarError(landmark, information, landmarkSubset));
+//  // add to map
+//  mapPtr_->addResidualBlock(sonarError, NULL, pointParameterBlock);*/
+//
+//  // TODO(Sharmin) check it!!
+//  /*std::shared_ptr<okvis::ceres::HomogeneousPointError> homogeneousPointError(
+//               new okvis::ceres::HomogeneousPointError(
+//                               landmark, 0.01));
+//
+//  mapPtr_->addResidualBlock(
+//               homogeneousPointError, NULL, pointParameterBlock);*/
+//
+//  // remember
+//  double dist = std::numeric_limits<double>::max();
+//  if (fabs(landmark[3]) > 1.0e-8) {
+//    dist = (landmark / landmark[3]).head<3>().norm();  // euclidean distance
+//  }
+//  //  (sharmin) check landmarksMap
+//  landmarksMap_.insert(std::pair<uint64_t, MapPoint>(landmarkId, MapPoint(landmarkId, landmark, 0.0, dist)));
+//  OKVIS_ASSERT_TRUE_DBG(
+//      Exception, isLandmarkAdded(landmarkId), "bug adding sonar landmark: inconsistend landmarkdMap_ with mapPtr_.");
+//  return true;
+//}
 // @Sharmin
 // Add a sonar landmark.
 // TODO(sharmin) check whether it's okvis::ceres::Map::Sonar or okvis::ceres::Map::HomogeneousPoint
-bool Estimator::addSonarLandmark(uint64_t landmarkId, const Eigen::Vector4d& landmark) {
-  std::shared_ptr<okvis::ceres::HomogeneousPointParameterBlock> pointParameterBlock(
-      new okvis::ceres::HomogeneousPointParameterBlock(landmark, landmarkId));
-  if (!mapPtr_->addParameterBlock(pointParameterBlock, okvis::ceres::Map::HomogeneousPoint)) {
-    return false;
+bool Estimator::addSonarLandmark(uint64_t landmarkId,
+                                 const okvis::VioParameters& params,
+                                 const Eigen::Vector3d& pts1,
+                                 const Eigen::Vector3d& pts2,
+                                 okvis::kinematics::Transformation& T_WS,
+                                 okvis::Time timestamp
+                                 )
+{
+  std::shared_ptr<okvis::ceres::PoseParameterBlock> sonarposeParameterBlock(
+     new okvis::ceres::PoseParameterBlock(T_WS, landmarkId, timestamp));
+  if (!mapPtr_->addParameterBlock(sonarposeParameterBlock, ceres::Map::Pose6d)) {
+     return false;
   }
+
+//  std::shared_ptr<ceres::SonarError> forwardsonarError(
+//                  new ceres::SonarError(params, pts1, pts2, T_WSlast_));
+//  mapPtr_->addResidualBlock(forwardsonarError, NULL, sonarposeParameterBlock);
 
   /*std::shared_ptr<okvis::ceres::SonarParameterBlock> pointParameterBlock(
       new okvis::ceres::SonarParameterBlock(landmark, landmarkId));
@@ -462,16 +947,25 @@ bool Estimator::addSonarLandmark(uint64_t landmarkId, const Eigen::Vector4d& lan
                homogeneousPointError, NULL, pointParameterBlock);*/
 
   // remember
-  double dist = std::numeric_limits<double>::max();
-  if (fabs(landmark[3]) > 1.0e-8) {
-    dist = (landmark / landmark[3]).head<3>().norm();  // euclidean distance
-  }
-  //  (sharmin) check landmarksMap
-  landmarksMap_.insert(std::pair<uint64_t, MapPoint>(landmarkId, MapPoint(landmarkId, landmark, 0.0, dist)));
-  OKVIS_ASSERT_TRUE_DBG(
-      Exception, isLandmarkAdded(landmarkId), "bug adding sonar landmark: inconsistend landmarkdMap_ with mapPtr_.");
+//  T_WSlast_ = T_WSLast;
+//  resolution_ = sonar_resolution;
+//  double dist = std::numeric_limits<double>::max();
+//  if (fabs(landmark[2]) > 1.0e-8) {
+//    dist = (landmark / landmark[2]).head<3>().norm();  // euclidean distance
+//  }
+//  //  (sharmin) check landmarksMap
+//  landmarksMap_.insert(std::pair<uint64_t, MapPoint>(landmarkId, MapPoint(landmarkId, landmark, 0.0, dist)));
+//  OKVIS_ASSERT_TRUE_DBG(
+//      Exception, isLandmarkAdded(landmarkId), "bug adding sonar landmark: inconsistend landmarkdMap_ with mapPtr_.");
   return true;
 }
+
+//bool Estimator::addSonarParaments(double sonar_resolution,
+//                                 okvis::kinematics::Transformation& T_WSLast)
+//{
+//  T_WSlast_ = T_WSLast;
+//  resolution_ = sonar_resolution;
+//}
 
 // Add a landmark.
 bool Estimator::addLandmark(uint64_t landmarkId, const Eigen::Vector4d& landmark) {

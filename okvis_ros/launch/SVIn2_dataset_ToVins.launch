@@ -1,0 +1,21 @@
+<launch>
+
+  <!-- Arguments -->
+  <arg name="bagfile" default="/home/sz/SVIn2_data/Bus/bus_out_loop_w_cam_info.bag"/>
+  <!-- Play the bagfile -->
+  <node pkg="rosbag" type="play" name="rosbag" args="--clock $(arg bagfile) -r 0.5" />
+  <param name="/use_sim_time" value="true"/>
+  <!-- To un-compress image topics -->
+  <node name="republish1" type="republish" pkg="image_transport" output="screen" args="compressed in:=/slave1/image_raw raw out:=/cam0/image_raw" />
+  <node name="republish2" type="republish" pkg="image_transport" output="screen" args="compressed in:=/slave2/image_raw raw out:=/cam1/image_raw" />
+
+  <!-- Run the stereo image proc -->
+<!--   <node pkg="stereo_image_proc" type="stereo_image_proc" name="stereo_image_proc" > -->
+<!--     <remap from="/left/image_raw" to="/cam0/image_raw" /> -->
+<!--     <remap from="/right/image_raw" to="/cam1/image_raw" /> -->
+<!--     <remap from="/left/camera_info" to="/slave1/image_raw/cam_info" /> -->
+<!--     <remap from="/right/camera_info" to="/slave2/image_raw/cam_info" /> -->
+<!--     <param name="approximate_sync" value="true"/> -->
+<!--   </node> -->
+
+</launch>

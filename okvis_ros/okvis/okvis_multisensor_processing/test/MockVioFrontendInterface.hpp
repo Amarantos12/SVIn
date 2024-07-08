@@ -56,7 +56,8 @@ class MockVioFrontendInterface {
                     const okvis::VioParameters& params,
                     const std::shared_ptr<okvis::MapPointVector> map,
                     std::shared_ptr<okvis::MultiFrame> framesInOut,
-                    bool* asKeyframe));
+                    bool* asKeyframe,
+                    bool* asKeySonarframe));
   MOCK_CONST_METHOD8(propagation,
                      bool(const okvis::ImuMeasurementDeque& imuMeasurements,
                           const okvis::ImuParameters& imuParams,

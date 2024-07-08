@@ -117,10 +117,13 @@ class VioBackendInterface {
   virtual bool addStates(okvis::MultiFramePtr multiFrame,
                          const okvis::ImuMeasurementDeque& imuMeasurements,
                          const okvis::VioParameters& params,                    /* @Sharmin */
-                         const okvis::SonarMeasurementDeque& sonarMeasurements, /* @Sharmin */
+                         const okvis::ForwardSonarMeasurement& keyforwardsonarMeasurements, /* @ShuPan */
+                         const okvis::ForwardSonarMeasurement& forwardsonarMeasurements, /* @ShuPan */
                          const okvis::DepthMeasurementDeque& depthMeasurements,
                          double firstDepth, /* @Sharmin */
-                         bool asKeyframe) = 0;
+                         bool asKeyframe,
+                         okvis::kinematics::Transformation T_WSL,
+                         double sonar_resolution) = 0;
 
   /**
    * @brief Add a landmark.

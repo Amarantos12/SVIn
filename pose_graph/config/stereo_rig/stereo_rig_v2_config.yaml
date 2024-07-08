@@ -5,7 +5,7 @@ model_type: PINHOLE
 camera_name: slave1
 
 #image resize factor. Note that, this factor MUST be same as OKVIS config file
-resizeFactor: 1.0
+resizeFactor: 0.5
 
 #optimization parameters
 max_solver_time: 0.04  # max solver itration time (ms), to guarantee real time
@@ -35,8 +35,8 @@ global_mapping:
     
 debug_image: 1
 
-image_height: 600
-image_width: 800
-focal_length: [578.25942673, 578.28863331]
-principal_point: [381.60416582, 308.63899269]
-distortion_coefficients: [0.0, 0.0, 0.0, 0.0]
+image_height: 1200
+image_width: 1600
+focal_length: [1156.5188534683703, 1156.5772666173266]
+principal_point: [763.2083316463371, 617.2779853849335]
+distortion_coefficients: [-0.17473019446863114, 0.10643290428040156, 0.005210777878907861, -0.00028664918860079295]

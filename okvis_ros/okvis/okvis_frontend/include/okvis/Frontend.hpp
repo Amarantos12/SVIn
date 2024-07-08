@@ -108,7 +108,8 @@ class Frontend : public VioFrontendInterface {
                                                 const okvis::VioParameters& params,
                                                 const std::shared_ptr<okvis::MapPointVector> map,
                                                 std::shared_ptr<okvis::MultiFrame> framesInOut,
-                                                bool* asKeyframe);
+                                                bool* asKeyframe,
+                                                bool* asKeySonarframe);
 
   /**
    * @brief Propagates pose, speeds and biases with given IMU measurements.
@@ -233,6 +234,14 @@ class Frontend : public VioFrontendInterface {
   void setKeyframeInsertionMatchingRatioThreshold(float threshold) {
     keyframeInsertionMatchingRatioThreshold_ = threshold;
   }
+  // Shu Pan
+  void setForwardsonarUsed(bool fsUsed)
+  {
+     isforwardsonarUsed_ = fsUsed;
+  }
+//  void sonar_pose_estimation(const std::vector<Eigen::Vector3d> &pts1,
+//                                     const std::vector<Eigen::Vector3d> &pts2,
+//                                     Eigen::Matrix3d &R, Eigen::Vector3d &t);
 
   /// @}
 
@@ -273,6 +282,8 @@ class Frontend : public VioFrontendInterface {
   double briskDetectionAbsoluteThreshold_;  ///< The set BRISK absolute detection threshold.
   size_t briskDetectionMaximumKeypoints_;   ///< The set maximum number of keypoints.
 
+  bool isforwardsonarUsed_ = false;
+
   /// @}
   /// @name BRISK descriptor extractor parameters
   /// @{
@@ -305,13 +316,15 @@ class Frontend : public VioFrontendInterface {
    */
   float keyframeInsertionMatchingRatioThreshold_;  // 0.2
 
+  int visualfailtime_ = 0;
+
   /**
    * @brief Decision whether a new frame should be keyframe or not.
    * @param estimator     const reference to the estimator.
    * @param currentFrame  Keyframe candidate.
    * @return True if it should be a new keyframe.
    */
-  bool doWeNeedANewKeyframe(const okvis::Estimator& estimator,
+  bool doWeNeedANewKeyframe(okvis::Estimator& estimator,
                             std::shared_ptr<okvis::MultiFrame> currentFrame);  // based on some overlap area heuristics
 
   /**
@@ -333,6 +346,7 @@ class Frontend : public VioFrontendInterface {
                        const okvis::VioParameters& params,
                        const uint64_t currentFrameId,
                        bool& rotationOnly,  // NOLINT
+                       bool& sonarchangeKf,  // NOLINT
                        bool usePoseUncertainty = true,
                        double* uncertainMatchFraction = 0,
                        bool removeOutliers = true);  // for wide-baseline matches (good initial guess)
@@ -399,7 +413,8 @@ class Frontend : public VioFrontendInterface {
                     uint64_t olderFrameId,
                     bool initializePose,
                     bool removeOutliers,
-                    bool& rotationOnly);  // NOLINT
+                    bool& rotationOnly,
+                    bool& sonarchangeKf);  // NOLINT
   // Added by Sharmin
   int runRansac2d2dToRefineScale(okvis::Estimator& estimator,  // NOLINT
                                  const okvis::VioParameters& params,

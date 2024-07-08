@@ -115,6 +115,9 @@ void Publisher::setNodeHandle(ros::NodeHandle& nh) {
     meshMsg_.mesh_resource = "";
   }
 
+  save_file.open("/home/sz/catkin_ws/src/SVIn/okvis_estimator_path.txt", std::ios::app);
+  save_file.setf(std::ios::fixed, std::ios::floatfield);
+  save_file.precision(9);
   static_tf_published_ = false;
 }
 
@@ -976,6 +979,10 @@ void Publisher::setPath(const okvis::kinematics::Transformation& T_WS) {
   pose.pose.orientation.y = q.y();
   pose.pose.orientation.z = q.z();
   pose.pose.orientation.w = q.w();
+
+  save_file << _t << " " << r[0] << " " << r[1] << " " << r[2] << " "
+                      << q.x() << " " << q.y() << " " << q.z() << " "
+                      << q.w() << std::endl;
 
   path_.header.stamp = _t;
   path_.header.frame_id = "world";

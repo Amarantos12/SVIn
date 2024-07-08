@@ -1,0 +1,55 @@
+<launch>
+
+  <!-- Arguments -->
+<!--   <arg name="config_path" default="$(find pose_graph)/config/stereo_rig/stereo_rig_config.yaml" /> -->
+<arg name="config_path" default="$(find pose_graph)/config/stereo_rig/stereo_rexrov_config.yaml" />
+
+  <param name="/use_sim_time" value="true" />
+
+
+<!--    --><!-- To un-compress image topics -->
+  <node name="republish1" type="republish" pkg="image_transport" output="screen"
+    args="compressed in:=/rexrov/rexrov/cameraleft/camera_image raw out:=/cam0/image_raw" />
+  <node name="republish2" type="republish" pkg="image_transport" output="screen"
+    args="compressed in:=/rexrov/rexrov/cameraright/camera_image raw out:=/cam1/image_raw" />
+
+  Run pose_graph node-->
+  <node name="pose_graph_node" pkg="pose_graph" type="pose_graph_node" output="screen">
+    <param name=" config_file" type="string" value="$(arg config_path)" />
+  </node>
+
+
+  <node name="okvis_node" pkg="okvis_ros" type="okvis_node">
+
+<!--     <param name="config_filename" value="$(find okvis_ros)/okvis/config/config_stereo_rig_aprilgrid.yaml" /> -->
+    <param name="config_filename" value="$(find okvis_ros)/okvis/config/config_rexrov.yaml" />
+    <param name="mesh_file" value="firefly.dae" />
+
+
+    <remap from="/camera0" to="/cam0/image_raw" />
+    <remap from="/camera1" to="/cam1/image_raw" />
+
+<!--     <remap from="/imu" to="/zed2/zed_node/imu/data_raw" /> -->
+    <remap from="/imu" to="/rexrov/imu" />
+
+  </node>
+
+<!--  <node name="okvis_node" pkg="okvis_ros" type="okvis_node"> -->
+
+<!--     <param name="config_filename" value="$(find okvis_ros)/okvis/config/config_bluerov2_subsea_pannel.yaml" /> -->
+<!--     <param name="config_filename" value="$(find okvis_ros)/okvis/config/config_stereorig_v1.yaml" /> -->
+<!--     <param name="config_filename" value="$(find okvis_ros)/okvis/config/config_stereo_rig_aprilgrid.yaml" /> -->
+<!--     <param name="mesh_file" value="firefly.dae" /> -->
+
+
+<!--     <remap from="/camera0" to="/bluerov2/bluerov2/cameraleft/camera_image"/> -->
+<!--     <remap from="/camera1" to="/bluerov2/bluerov2/cameraright/camera_image"/> -->
+
+<!--     <remap from="/imu" to="//bluerov2/imu" /> -->
+
+<!--   </node> -->
+
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find okvis_ros)/config/rviz_svin.rviz" />
+
+
+</launch>

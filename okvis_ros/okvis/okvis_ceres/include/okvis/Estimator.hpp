@@ -134,10 +134,13 @@ class Estimator : public VioBackendInterface {
   bool addStates(okvis::MultiFramePtr multiFrame,
                  const okvis::ImuMeasurementDeque& imuMeasurements,
                  const okvis::VioParameters& params,                    /* @Sharmin */
-                 const okvis::SonarMeasurementDeque& sonarMeasurements, /*Sharmin*/
+                 const okvis::ForwardSonarMeasurement& keyforwardsonarMeasurements, /* @ShuPan */
+                 const okvis::ForwardSonarMeasurement& forwardsonarMeasurements, /* @ShuPan */
                  const okvis::DepthMeasurementDeque& depthMeasurements,
                  double firstDepth, /*Sharmin*/
-                 bool asKeyframe);
+                 bool asKeyframe,
+                 okvis::kinematics::Transformation T_WSL,
+                 double sonar_resolution);
 
   /**
    * @brief Prints state information to buffer.
@@ -161,7 +164,17 @@ class Estimator : public VioBackendInterface {
    * @param landmark Homogeneous coordinates of landmark in W-frame.
    * @return True if successful.
    */
-  bool addSonarLandmark(uint64_t landmarkId, const Eigen::Vector4d& landmark);
+//  bool addSonarLandmark(uint64_t landmarkId,
+//                        const Eigen::Vector4d& landmark);
+  bool addSonarLandmark(uint64_t landmarkId,
+                        const okvis::VioParameters& params,
+                        const Eigen::Vector3d& pts1,
+                        const Eigen::Vector3d& pts2,
+                        okvis::kinematics::Transformation& T_WS,
+                        okvis::Time timestamp);
+
+  bool addSonarParaments(double sonar_resolution,
+                         okvis::kinematics::Transformation& T_WSLast);
 
   /**
    * @brief Add an observation to a landmark.
@@ -287,6 +300,43 @@ class Estimator : public VioBackendInterface {
   }
 
   /**
+   * @brief Get a forwardsonarframe.
+   * @param frameId ID of desired forwardsonarframe.
+   * @return Shared pointer to forwardsonarframe.
+   */
+  okvis::ForwardSonarMeasurement forwardsonarFrame(uint64_t frameId) const {
+    OKVIS_ASSERT_TRUE_DBG(Exception,
+                          forwardsonarFramePtrMap_.find(frameId) != forwardsonarFramePtrMap_.end(),
+                          "Requested multi-frame does not exist in estimator.");
+    return forwardsonarFramePtrMap_.at(frameId);
+  }
+
+   /**
+   * @brief forwardsonarMatching.
+   * @return matched sonar points.
+   */
+void forwardsonarMatchW3D(const okvis::ForwardSonarMeasurement& keyforwardsonarMeasurements,
+                          const okvis::ForwardSonarMeasurement& forwardsonarMeasurements,
+                          const okvis::VioParameters& params,
+                          const okvis::kinematics::Transformation& T_WS,
+                          const okvis::kinematics::Transformation& T_WSlast,
+                          std::vector<Eigen::Vector3d>& lastpts,
+                          std::vector<Eigen::Vector3d>& curpts);
+
+void forwardsonarMatching(const okvis::ForwardSonarMeasurement& keyforwardsonarMeasurements,
+                          const okvis::ForwardSonarMeasurement& forwardsonarMeasurements,
+                          std::vector<Eigen::Vector3d>& lastpts,
+                          std::vector<Eigen::Vector3d>& curpts);
+
+void sonar_pose_estimation(const std::vector<Eigen::Vector3d> &pts1,
+                           const std::vector<Eigen::Vector3d> &pts2,
+                           Eigen::Matrix3d &R, Eigen::Vector3d &t);
+
+void drawVerticalMatches(const cv::Mat& image1, const std::vector<cv::KeyPoint>& keypoints1,
+                         const cv::Mat& image2, const std::vector<cv::KeyPoint>& keypoints2,
+                         const std::vector<cv::DMatch>& matches, cv::Mat& output);
+
+  /**
    * @brief Get pose for a given pose ID.
    * @param[in]  poseId ID of desired pose.
    * @param[out] T_WS Homogeneous transformation of this pose.
@@ -355,6 +405,10 @@ class Estimator : public VioBackendInterface {
    * @return True if the frame is a keyframe.
    */
   bool isKeyframe(uint64_t frameId) const { return statesMap_.at(frameId).isKeyframe; }
+
+  bool isKeySonarframe(uint64_t frameId) const { return statesMap_.at(frameId).isKeySonarframe; }
+
+  void SetCameraMatchedSize(uint64_t MatchedSize) {CameraMatchedSize_ = MatchedSize; }
 
   /**
    * @brief Checks if a particular frame is still in the IMU window.
@@ -443,12 +497,16 @@ class Estimator : public VioBackendInterface {
   /// @param[in] isKeyframe Whether or not keyrame.
   void setKeyframe(uint64_t frameId, bool isKeyframe) { statesMap_.at(frameId).isKeyframe = isKeyframe; }
 
+  void setKeySonarframe(uint64_t frameId, bool isKeySonarframe) { statesMap_.at(frameId).isKeySonarframe = isKeySonarframe; }
   /// @brief set ceres map
   /// @param[in] mapPtr The pointer to the okvis::ceres::Map.
   void setMap(std::shared_ptr<okvis::ceres::Map> mapPtr) { mapPtr_ = mapPtr; }
 
   int stateCount_ = 0;  // FIXME Sharmin: make it private and create set/get functions
                         ///@}
+  int disgardedtime_ = 0;
+  int sonarOptimized_ = 0;
+  uint64_t CameraMatchedSize_;
 
  private:
   /**
@@ -591,6 +649,7 @@ class Estimator : public VioBackendInterface {
     GlobalStatesContainer global;
     AllSensorStatesContainer sensors;
     bool isKeyframe;
+    bool isKeySonarframe;
     uint64_t id;
     okvis::Time timestamp;
   };
@@ -599,7 +658,8 @@ class Estimator : public VioBackendInterface {
   std::map<uint64_t, States> statesMap_;                       ///< Buffer for currently considered states.
   std::map<uint64_t, okvis::MultiFramePtr> multiFramePtrMap_;  ///< remember all needed okvis::MultiFrame.
   std::shared_ptr<okvis::ceres::Map> mapPtr_;                  ///< The underlying okvis::Map.
-
+  // @Shu Pan
+  std::map<uint64_t, okvis::ForwardSonarMeasurement> forwardsonarFramePtrMap_;  ///< remember all needed okvis::MultiFrame.
   // this is the reference pose
   uint64_t referencePoseId_;  ///< The pose ID of the reference (currently not changing)
 
@@ -625,6 +685,8 @@ class Estimator : public VioBackendInterface {
   // ceres iteration callback object
   std::unique_ptr<okvis::ceres::CeresIterationCallback>
       ceresCallback_;  ///< Maybe there was a callback registered, store it here.
+  double resolution_;
+  okvis::kinematics::Transformation T_S1_S2_;
 };
 
 }  // namespace okvis

@@ -90,9 +90,13 @@ Subscriber::Subscriber(ros::NodeHandle& nh,
     clahe->setTilesGridSize(
         cv::Size(vioParameters_.histogramParams.claheTilesGridSize, vioParameters_.histogramParams.claheTilesGridSize));
 
-    std::cout << "Set Clahe Params " << vioParameters_.histogramParams.claheClipLimit << " "
-              << vioParameters_.histogramParams.claheTilesGridSize << std::endl;
+//    LOG(INFO) << "##############Set Clahe Params " << vioParameters_.histogramParams.claheClipLimit << " "
+//              << vioParameters_.histogramParams.claheTilesGridSize << std::endl;
   }
+
+  //add by shupan
+  sonar_range_ = 0;
+  range_resolution_ = 0;
 }
 
 void Subscriber::setNodeHandle(ros::NodeHandle& nh) {
@@ -123,7 +127,14 @@ void Subscriber::setNodeHandle(ros::NodeHandle& nh) {
   // subDepth_ = nh_->subscribe("/bar30/depth", 1000, &Subscriber::depthCallback, this);
   // subDepth_ = nh_->subscribe("/aqua/state", 1000, &Subscriber::depthCallback, this); // Aqua depth topic
   // }
-
+  if (vioParameters_.sensorList.isForwardSonarUsed) {
+//      if(!Sonarres_Initialization_)
+//      {
+//         subSonarPing_ = nh_->subscribe("/sonar_oculus_node/ping", 2000, &Subscriber::sonarpingCallback, this);
+//      }
+      subSonarRange_ = nh_->subscribe("/sonar_oculus_node/image", 2000, &Subscriber::forwardsonarCallback, this);
+//        subSonarRange_ = nh_->subscribe("/rexrov/blueview_m450/sonar_image", 2000, &Subscriber::forwardsonarCallback, this);
+  }
   // Sharmin
   if (vioParameters_.relocParameters.isRelocalization) {
     std::cout << "Subscribing to /pose_graph/match_points topic" << std::endl;
@@ -145,7 +156,7 @@ void Subscriber::imageCallback(const sensor_msgs::ImageConstPtr& msg, unsigned i
   } else {
     raw_resized = raw.clone();
   }
-
+//  imshow("camImage", raw_resized);
   cv::Mat filtered;
   if (vioParameters_.optimization.useMedianFilter) {
     cv::medianBlur(raw_resized, filtered, 3);
@@ -256,6 +267,32 @@ void Subscriber::sonarCallback(const imagenex831l::ProcessedRange::ConstPtr& msg
   }
 }
 
+void Subscriber::sonarpingCallback(const forward_sonar::OculusPing::ConstPtr& msg) {
+//    LOG(INFO) << "sonarpingCallback: " << msg->fire_msg.range << " " << msg->range_resolution;
+    sonar_range_ = msg->fire_msg.range;
+    range_resolution_ = msg->range_resolution;
+    Sonarres_Initialization_ = true;
+}
+
+// @ShuPan
+void Subscriber::forwardsonarCallback(const sensor_msgs::ImageConstPtr& msg) {
+    Mat fsonarImage = cv_bridge::toCvShare(msg, "bgr8")->image;
+    // adapt timestamp
+    okvis::Time t(msg->header.stamp.sec, msg->header.stamp.nsec);
+
+//    LOG(INFO) << "************sonar_range_: " << sonar_range_ << " range_resolution_: " << range_resolution_;
+//    if (!vioInterface_->addFSonarMeasurement(t, fsonarImage, sonar_range_, range_resolution_)){
+//        LOG(WARNING) << "Sonar Frame delayed at time " << t;
+//    }
+//    if (!vioInterface_->addFSonarMeasurement(t, fsonarImage, 7, 0.01598)){
+//        LOG(WARNING) << "Sonar Frame delayed at time " << t;
+//    }
+
+    if (!vioInterface_->addFSonarMeasurement(t, fsonarImage, 10, 0.04361)){   //0.04361   0.02506
+        LOG(WARNING) << "Sonar Frame delayed at time " << t;
+    }
+}
+
 const cv::Mat Subscriber::readRosImage(const sensor_msgs::ImageConstPtr& img_msg) const {
   CHECK(img_msg);
   cv_bridge::CvImageConstPtr cv_ptr;
@@ -270,20 +307,40 @@ const cv::Mat Subscriber::readRosImage(const sensor_msgs::ImageConstPtr& img_msg
   CHECK(cv_ptr);
   const cv::Mat img_const = cv_ptr->image;  // Don't modify shared image in ROS.
   cv::Mat converted_img(img_const.size(), CV_8U);
+//  imshow("camImage", img_const);
   if (img_msg->encoding == sensor_msgs::image_encodings::BGR8) {
     // LOG_EVERY_N(WARNING, 10) << "Converting image...";
     cv::cvtColor(img_const, converted_img, cv::COLOR_BGR2GRAY);
     return converted_img;
-  } else if (img_msg->encoding == sensor_msgs::image_encodings::RGB8) {
+  } else if (img_msg->encoding == sensor_msgs::image_encodings::MONO8) {
     // LOG_EVERY_N(WARNING, 10) << "Converting image...";
     cv::cvtColor(img_const, converted_img, cv::COLOR_RGB2GRAY);
     return converted_img;
-  } else {
+  } else if (img_msg->encoding == sensor_msgs::image_encodings::BGRA8) {
+    // LOG_EVERY_N(WARNING, 10) << "Converting image...";
+    cv::cvtColor(img_const, converted_img, cv::COLOR_RGB2GRAY);
+    return converted_img;
+  }else {
     CHECK_EQ(cv_ptr->encoding, sensor_msgs::image_encodings::MONO8)
         << "Expected image with MONO8, BGR8, or RGB8 encoding."
            "Add in here more conversions if you wish.";
     return img_const;
   }
+
+//  if (img_msg->encoding == sensor_msgs::image_encodings::BGR8) {
+//    // LOG_EVERY_N(WARNING, 10) << "Converting image...";
+//    cv::cvtColor(img_const, converted_img, cv::COLOR_BGR2GRAY);
+//    return converted_img;
+//  } else if (img_msg->encoding == sensor_msgs::image_encodings::RGB8) {
+//    // LOG_EVERY_N(WARNING, 10) << "Converting image...";
+//    cv::cvtColor(img_const, converted_img, cv::COLOR_RGB2GRAY);
+//    return converted_img;
+//  }else {
+//    CHECK_EQ(cv_ptr->encoding, sensor_msgs::image_encodings::MONO8)
+//        << "Expected image with MONO8, BGR8, or RGB8 encoding."
+//           "Add in here more conversions if you wish.";
+//    return img_const;
+//  }
 }
 
 #ifdef HAVE_LIBVISENSOR

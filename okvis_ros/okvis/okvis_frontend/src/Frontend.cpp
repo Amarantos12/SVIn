@@ -56,6 +56,7 @@
 #include <okvis/cameras/PinholeCamera.hpp>
 #include <okvis/cameras/RadialTangentialDistortion.hpp>
 #include <okvis/cameras/RadialTangentialDistortion8.hpp>
+#include <okvis/cameras/NCameraSystem.hpp>
 #include <vector>
 // Kneip RANSAC
 #include <opengv/sac/Ransac.hpp>
@@ -119,7 +120,8 @@ bool Frontend::dataAssociationAndInitialization(
     const okvis::VioParameters& params,
     const std::shared_ptr<okvis::MapPointVector> /*map*/,  // TODO(sleutenegger): why is this not used here?
     std::shared_ptr<okvis::MultiFrame> framesInOut,
-    bool* asKeyframe) {
+    bool* asKeyframe,
+    bool* asKeySonarframe) {
   // match new keypoints to existing landmarks/keypoints
   // initialise new landmarks (states)
   // outlier rejection by consistency check
@@ -136,31 +138,31 @@ bool Frontend::dataAssociationAndInitialization(
   int num3dMatches = 0;
 
   // first frame? (did do addStates before, so 1 frame minimum in estimator)
-  if (estimator.numFrames() > 1) {
+  if (estimator.numFrames() > 2) {
     int requiredMatches = 5;
 
     double uncertainMatchFraction = 0;
     bool rotationOnly = false;
-
+    bool sonarchangeKf = false;
     // match to last keyframe
     TimerSwitchable matchKeyframesTimer("2.4.1 matchToKeyframes");
     switch (distortionType) {
       case okvis::cameras::NCameraSystem::RadialTangential: {
         num3dMatches = matchToKeyframes<VioKeyframeWindowMatchingAlgorithm<
             okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion> > >(
-            estimator, params, framesInOut->id(), rotationOnly, false, &uncertainMatchFraction);
+            estimator, params, framesInOut->id(), rotationOnly, sonarchangeKf, false, &uncertainMatchFraction);
         break;
       }
       case okvis::cameras::NCameraSystem::Equidistant: {
         num3dMatches = matchToKeyframes<
             VioKeyframeWindowMatchingAlgorithm<okvis::cameras::PinholeCamera<okvis::cameras::EquidistantDistortion> > >(
-            estimator, params, framesInOut->id(), rotationOnly, false, &uncertainMatchFraction);
+            estimator, params, framesInOut->id(), rotationOnly, sonarchangeKf, false, &uncertainMatchFraction);
         break;
       }
       case okvis::cameras::NCameraSystem::RadialTangential8: {
         num3dMatches = matchToKeyframes<VioKeyframeWindowMatchingAlgorithm<
             okvis::cameras::PinholeCamera<okvis::cameras::RadialTangentialDistortion8> > >(
-            estimator, params, framesInOut->id(), rotationOnly, false, &uncertainMatchFraction);
+            estimator, params, framesInOut->id(), rotationOnly, sonarchangeKf, false, &uncertainMatchFraction);
         break;
       }
       default:
@@ -181,7 +183,10 @@ bool Frontend::dataAssociationAndInitialization(
 
     // keyframe decision, at the moment only landmarks that match with keyframe are initialised
     *asKeyframe = *asKeyframe || doWeNeedANewKeyframe(estimator, framesInOut);
-
+//    if(sonarchangeKf == true || (*asKeyframe == true))
+//    {
+//        *asKeySonarframe = true;
+//    }
     // match to last frame
     TimerSwitchable matchToLastFrameTimer("2.4.2 matchToLastFrame");
     switch (distortionType) {
@@ -262,7 +267,7 @@ bool Frontend::propagation(const okvis::ImuMeasurementDeque& imuMeasurements,
 }
 
 // Decision whether a new frame should be keyframe or not.
-bool Frontend::doWeNeedANewKeyframe(const okvis::Estimator& estimator,
+bool Frontend::doWeNeedANewKeyframe(okvis::Estimator& estimator,
                                     std::shared_ptr<okvis::MultiFrame> currentFrame) {
   // Sharmin: Modified for Scale refinement
   // if (estimator.numFrames() < 2) {
@@ -276,6 +281,7 @@ bool Frontend::doWeNeedANewKeyframe(const okvis::Estimator& estimator,
   double overlap = 0.0;
   double ratio = 0.0;
 
+  uint64_t MatchedSize = 0;
   // go through all the frames and try to match the initialized keypoints
   for (size_t im = 0; im < currentFrame->numFrames(); ++im) {
     // get the hull of all keypoints in current frame
@@ -296,7 +302,7 @@ bool Frontend::doWeNeedANewKeyframe(const okvis::Estimator& estimator,
         frameBMatches.push_back(cv::Point2f(keypoint[0], keypoint[1]));
       }
     }
-
+    MatchedSize = frameBMatches.size();
     if (frameBPoints.size() < 3) continue;
     cv::convexHull(frameBPoints, frameBHull);
     if (frameBMatches.size() < 3) continue;
@@ -317,18 +323,41 @@ bool Frontend::doWeNeedANewKeyframe(const okvis::Estimator& estimator,
         }
       }
     }
+//    LOG(INFO) << "MatchedSize: " << MatchedSize;
     double matchingRatio = static_cast<double>(frameBMatches.size()) / static_cast<double>(pointsInFrameBMatchesArea);
-
     // calculate overlap score
     overlap = std::max(overlapArea, overlap);
     ratio = std::max(matchingRatio, ratio);
   }
-
+  estimator.SetCameraMatchedSize(MatchedSize);
+//  LOG(INFO) << "keypoints camera 0: " << currentFrame->numKeypoints(0) << " camera 1: " << currentFrame->numKeypoints(1)
+//            << " MatchedSize: " << MatchedSize << " visualfailtime_: " << visualfailtime_;
   // take a decision
   if (overlap > keyframeInsertionOverlapThreshold_ && ratio > keyframeInsertionMatchingRatioThreshold_)
     return false;
   else
-    return true;
+  {
+      if (isforwardsonarUsed_ && isInitialized_)
+      {
+            if((currentFrame->numKeypoints(0) >= 80) && (currentFrame->numKeypoints(1) >= 80) && (MatchedSize >= 3))
+            {
+                visualfailtime_ = 0;
+                return true;
+            }
+            else
+            {
+                visualfailtime_++;
+                if(visualfailtime_ >= 2)
+                {
+                    visualfailtime_ = 0;
+                    return true;
+                }
+                return false;
+            }
+      }
+      else
+         return true;
+  }
 }
 
 // Match a new multiframe to existing keyframes
@@ -337,10 +366,13 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
                                const okvis::VioParameters& params,
                                const uint64_t currentFrameId,
                                bool& rotationOnly,
+                               bool& sonarchangeKf,
                                bool usePoseUncertainty,
                                double* uncertainMatchFraction,
                                bool removeOutliers) {
   rotationOnly = true;
+  sonarchangeKf = false;
+  bool sonarchangeKf_tmp = false;
   if (estimator.numFrames() < 2) {
     // just starting, so yes, we need this as a new keyframe
     return 0;
@@ -385,19 +417,38 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
       numUncertainMatches += matchingAlgorithm.numUncertainMatches();
     }
 
+//    LOG(INFO) << "matchToKeyframes retCtr: " << retCtr
+//              << " olderId: " << olderFrameId
+//              << " currentId: " << currentFrameId;
+    bool rotationOnly_tmp = false;
+//    bool sonarchangeKf_tmp = false;
     // remove outliers
     // only do RANSAC 3D2D with most recent KF
     if (kfcounter == 0 && isInitialized_)
-      runRansac3d2d(estimator, params.nCameraSystem, estimator.multiFrame(currentFrameId), removeOutliers);
-
-    bool rotationOnly_tmp = false;
+    {
+      size_t ransac3d2dNum = runRansac3d2d(estimator, params.nCameraSystem, estimator.multiFrame(currentFrameId), removeOutliers);
+//      if(ransac3d2dNum < 5)
+//        runRansac2d2d(estimator, params, currentFrameId, olderFrameId, true, removeOutliers, rotationOnly_tmp, sonarchangeKf_tmp);
+    }
     // do RANSAC 2D2D for initialization only
     if (!isInitialized_) {
-      runRansac2d2d(estimator, params, currentFrameId, olderFrameId, true, removeOutliers, rotationOnly_tmp);
+      runRansac2d2d(estimator, params, currentFrameId, olderFrameId, true, removeOutliers, rotationOnly_tmp, sonarchangeKf_tmp);
     }
+//    if(isInitialized_ && retCtr < 50)
+//    {
+//       for (size_t age = 1; age < estimator.numFrames(); ++age) {
+//         uint64_t olderSonarFrameId = estimator.frameIdByAge(age);
+//         if (!estimator.isKeySonarframe(olderSonarFrameId)) continue;
+//         runRansac2d2d(estimator, params, currentFrameId, olderSonarFrameId, true, removeOutliers, rotationOnly_tmp, sonarchangeKf_tmp);
+//         break;
+//       }
+//    }
+//    LOG(INFO) << "isInitialized_: " << isInitialized_;
+
     // Sharmin: commented for scale
     if (firstFrame) {
       rotationOnly = rotationOnly_tmp;
+      sonarchangeKf = sonarchangeKf_tmp;
       firstFrame = false;
     }
 
@@ -406,7 +457,7 @@ int Frontend::matchToKeyframes(okvis::Estimator& estimator,
   }
 
   // calculate fraction of safe matches
-  if (uncertainMatchFraction) {
+  if (uncertainMatchFraction && retCtr > 0) {
     *uncertainMatchFraction = static_cast<double>(numUncertainMatches) / static_cast<double>(retCtr);
   }
 
@@ -433,6 +484,7 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
   }
 
   int retCtr = 0;
+  bool sonarchangeKf = false;
 
   for (size_t im = 0; im < params.nCameraSystem.numCameras(); ++im) {
     MATCHING_ALGORITHM matchingAlgorithm(
@@ -455,12 +507,56 @@ int Frontend::matchToLastFrame(okvis::Estimator& estimator,
     matcher_->match<MATCHING_ALGORITHM>(matchingAlgorithm);
     retCtr += matchingAlgorithm.numMatches();
   }
-
+//  LOG(INFO) << "matchToLastFrame retCtr: " << retCtr
+//            << " lastId: " << lastFrameId
+//            << " currentId: " << currentFrameId;
   // remove outliers
   bool rotationOnly = false;
   if (!isInitialized_)
-    runRansac2d2d(estimator, params, currentFrameId, lastFrameId, false, removeOutliers, rotationOnly);
-
+    runRansac2d2d(estimator, params, currentFrameId, lastFrameId, false, removeOutliers, rotationOnly, sonarchangeKf);
+//  if(isInitialized_ && retCtr < 50 && isforwardsonarUsed_){
+//    const size_t numCameras = params.nCameraSystem.numCameras();
+//    for (size_t im = 0; im < numCameras; ++im) {
+//      okvis::ForwardSonarMeasurement forwardsonarframeA = estimator.forwardsonarFrame(lastSonarFrameId);
+//      okvis::ForwardSonarMeasurement forwardsonarframeB = estimator.forwardsonarFrame(currentFrameId);
+////////          LOG(INFO) << "frameA id " << olderFrameId << ": " << forwardsonarframeA.measurement.keypoints.size()
+////////                    << " frameB pts " << currentFrameId << ": " << forwardsonarframeB.measurement.keypoints.size();
+//      std::vector<Eigen::Vector3d> lastpts;
+//      std::vector<Eigen::Vector3d> curpts;
+//      estimator.forwardsonarMatching(forwardsonarframeA, forwardsonarframeB, lastpts, curpts);
+//      LOG(INFO) << "matchToLastFrame lastpts size: " << lastpts.size()
+//                << " curpts size: " << curpts.size()
+//                << " frameA id " << lastSonarFrameId
+//                << " frameB id " << currentFrameId;
+//      if(curpts.size() < 10)
+//      {
+//        sonarchangeKf = true;
+//        continue;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
+//      }
+//      else{
+//          Eigen::Matrix3d R;
+//          Eigen::Vector3d t;
+//          sonar_pose_estimation(lastpts, curpts, R, t);
+//          Eigen::Quaterniond q(R);
+//          okvis::kinematics::Transformation T_S1S2(t, q);
+//          LOG(INFO) << "matchToLastFrame T_S1S2: " << T_S1S2.T3x4();
+//          okvis::kinematics::Transformation T_SCA, T_WSA, T_SC0, T_WS0;
+//          uint64_t idA = lastSonarFrameId;
+//          uint64_t id0 = currentFrameId;
+//          estimator.getCameraSensorStates(idA, im, T_SCA);
+//          estimator.get_T_WS(idA, T_WSA);
+//          estimator.getCameraSensorStates(id0, im, T_SC0);
+//          estimator.get_T_WS(id0, T_WS0);
+////               set.
+////          estimator.set_T_WS(id0, T_WSA * T_SCA * (*params.nCameraSystem.T_SC(0)).inverse() * params.sonar.T_SSo * T_S1S2 * T_SC0.inverse());
+//          estimator.set_T_WS(id0, T_WSA * params.sonar.T_SSo * T_S1S2 * params.sonar.T_SSo.inverse());
+//          if(curpts.size() < 35)
+//             sonarchangeKf = true;
+//       }
+//       break;
+//     }
+//     LOG(INFO) << "#####matchToLastFrame Point to rare!: " << sonarchangeKf;
+//  }
   return retCtr;
 }
 
@@ -702,9 +798,96 @@ int Frontend::runRansac2d2dToRefineScale(okvis::Estimator& estimator,
 
   size_t numCorrespondences = adapter.getNumberCorrespondences();
 
-  if (numCorrespondences < 10)
-    return 0;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
+//  if (numCorrespondences < 10)
+//    return 0;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
 
+ if (numCorrespondences < 10)
+    {
+        if (isforwardsonarUsed_)
+        {
+          std::vector<Eigen::Vector3d> PtsC1, PtsC2;
+          rotationOnly = true;
+          okvis::ForwardSonarMeasurement forwardsonarframeA = estimator.forwardsonarFrame(olderFrameId);
+          okvis::ForwardSonarMeasurement forwardsonarframeB = estimator.forwardsonarFrame(currentFrameId);
+//          LOG(INFO) << "frameA id " << olderFrameId << ": " << forwardsonarframeA.measurement.keypoints.size()
+//                    << " frameB pts " << currentFrameId << ": " << forwardsonarframeB.measurement.keypoints.size();
+          okvis::kinematics::Transformation T_SCA, T_WSA, T_SC0, T_WS0;
+          uint64_t idA = olderFrameId;  // idA, id0 same
+          uint64_t id0 = currentFrameId;
+          estimator.getCameraSensorStates(idA, 0, T_SCA);  // Sharmin: camIndex = 0
+          estimator.get_T_WS(idA, T_WSA);
+          estimator.getCameraSensorStates(id0, 1, T_SC0);  // Sharmin: camIndex = 1
+          estimator.get_T_WS(id0, T_WS0);
+          std::vector<Eigen::Vector3d> lastpts;
+          std::vector<Eigen::Vector3d> curpts;
+          estimator.forwardsonarMatching(forwardsonarframeA, forwardsonarframeB,
+                                         lastpts, curpts);
+          for(size_t i = 0; i < curpts.size(); i++)
+          {
+             okvis::kinematics::Transformation sonar_point(lastpts[i], Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+             okvis::kinematics::Transformation T_PC1 = (*params.nCameraSystem.T_SC(0)).inverse() * params.sonar.T_SSo * sonar_point;
+             Eigen::Vector3d PC1 = T_PC1.r();
+             PtsC1.push_back(PC1);
+          }
+          for(size_t i = 0; i < curpts.size(); i++)
+          {
+             okvis::kinematics::Transformation sonar_point(curpts[i], Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+             okvis::kinematics::Transformation T_PC2 = (*params.nCameraSystem.T_SC(1)).inverse() * params.sonar.T_SSo * sonar_point;
+             Eigen::Vector3d PC2 = T_PC2.r();
+             PtsC2.push_back(PC2);
+          }
+
+          if(curpts.size() < 10)
+            return 0;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
+          else{
+              Eigen::Matrix3d R;
+              Eigen::Vector3d t;
+//              sonar_pose_estimation(PtsC1, PtsC2, R, t);
+              estimator.sonar_pose_estimation(lastpts, curpts, R, t);
+              Eigen::Quaterniond q(R);
+              okvis::kinematics::Transformation T_S1S2(t, q);
+//              okvis::kinematics::Transformation T_C1C2(t, q);
+
+//              okvis::kinematics::Transformation T_WS_ransac2d2d =
+//                T_WSA * T_SCA * T_C1C2 * T_SC0.inverse();
+//              ransac2d2d_R_WS.push_back(T_WS_ransac2d2d.q().toRotationMatrix());
+//
+//              okvis::kinematics::Transformation T_WCA_ransac = T_WS_ransac2d2d * T_SCA;
+//              ransac2d2d_t_WC.push_back(T_WCA_ransac.r());
+//
+//              okvis::kinematics::Transformation T_SCA_ransac =
+//                 T_SCA * T_C1C2 * T_SC0.inverse() * T_SCA;
+//              ransac2d2d_t_SC.push_back(T_SCA_ransac.r());
+
+////              okvis::kinematics::Transformation T_WS_ransac2d2d =
+////                    T_WSA * T_SCA * (*params.nCameraSystem.T_SC(0)).inverse() * params.sonar.T_SSo * T_S1S2 * T_SC0.inverse();
+              okvis::kinematics::Transformation T_WS_ransac2d2d = T_WSA * params.sonar.T_SSo * T_S1S2 * params.sonar.T_SSo.inverse();
+              ransac2d2d_R_WS.push_back(T_WS_ransac2d2d.q().toRotationMatrix());
+//
+              okvis::kinematics::Transformation T_WCA_ransac = T_WS_ransac2d2d * T_SCA;
+              ransac2d2d_t_WC.push_back(T_WCA_ransac.r());
+//
+////              okvis::kinematics::Transformation T_SCA_ransac =
+////                T_SCA * (*params.nCameraSystem.T_SC(0)).inverse() * params.sonar.T_SSo * T_S1S2 * T_SC0.inverse() * T_SCA;
+              okvis::kinematics::Transformation T_SCA_ransac =
+                (T_SCA.inverse() * params.sonar.T_SSo * T_S1S2 * params.sonar.T_SSo.inverse()).inverse();
+              ransac2d2d_t_SC.push_back(T_SCA_ransac.r());
+
+              Eigen::Vector3d del_p, del_v;
+              double del_t;
+              estimator.getImuPreIntegral(idA, del_p, del_v, del_t);
+              imu_interal_deltaP.push_back(del_p);
+              imu_interal_deltaV.push_back(del_v);
+              imu_interal_dt.push_back(del_t);
+//              if(abs(t[0]) < 0.001 && abs(t[1]) < 0.001 && abs(t[2]) < 0.001)
+              return curpts.size();
+          }
+        }
+        else
+        {
+            return 0;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
+        }
+    }
   // try both the rotation-only RANSAC and the relative one:
 
   // create a RelativePoseSac problem and RANSAC
@@ -828,6 +1011,99 @@ int Frontend::runRansac2d2dToRefineScale(okvis::Estimator& estimator,
   return 0;
 }
 
+//void Frontend::sonar_pose_estimation(const std::vector<Eigen::Vector3d> &pts1,
+//                                     const std::vector<Eigen::Vector3d> &pts2,
+//                                     Eigen::Matrix3d &R, Eigen::Vector3d &t) {
+//    Eigen::Vector3d p1(0,0,0);
+//    Eigen::Vector3d p2(0,0,0);     // center of mass
+//    int N = pts1.size();
+//    for (int i = 0; i < N; i++) {
+//        p1[0] += pts1[i][0];
+//        p1[1] += pts1[i][1];
+//        p1[2] += pts1[i][2];
+//        p2[0] += pts2[i][0];
+//        p2[1] += pts2[i][1];
+//        p2[2] += pts2[i][2];
+//    }
+//    p1[0] = p1[0] / N;
+//    p1[1] = p1[1] / N;
+//    p1[2] = p1[2] / N;
+//    p2[0] = p2[0] / N;
+//    p2[1] = p2[1] / N;
+//    p2[2] = p2[2] / N;
+//    std::vector<Eigen::Vector3d> q1, q2; // remove the center
+//    q1.resize(N);
+//    q2.resize(N);
+//    for (int i = 0; i < N; i++) {
+//        q1[i][0] = pts1[i][0] - p1[0];
+//        q1[i][1] = pts1[i][1] - p1[1];
+//        q1[i][2] = pts1[i][2] - p1[2];
+//        q2[i][0] = pts2[i][0] - p2[0];
+//        q2[i][1] = pts2[i][1] - p2[1];
+//        q2[i][2] = pts2[i][2] - p2[2];
+//    }
+//
+//    // compute q1*q2^T
+//    Eigen::Matrix3d W = Eigen::Matrix3d::Zero();
+//    for (int i = 0; i < N; i++) {
+//        W += Eigen::Vector3d(q1[i][0], q1[i][1], q1[i][2]) * Eigen::Vector3d(q2[i][0], q2[i][1], q2[i][2]).transpose();
+//    }
+////    cout << "W=" << W << endl;
+//
+//    // SVD on W
+//    Eigen::JacobiSVD<Eigen::Matrix3d> svd(W, Eigen::ComputeFullU | Eigen::ComputeFullV);
+//    Eigen::Matrix3d U = svd.matrixU();
+//    Eigen::Matrix3d V = svd.matrixV();
+//
+////    cout << "U=" << U << endl;
+////    cout << "V=" << V << endl;
+//
+//    R = U * (V.transpose());
+//    if (R.determinant() < 0) {
+//        R = -R;
+//    }
+//    t = Eigen::Vector3d(p1[0], p1[1], p1[2]) - R * Eigen::Vector3d(p2[0], p2[1], p2[2]);
+//}
+
+//void Frontend::sonar_pose_estimation(const std::vector<cv::Point3f> &pts1,
+//                                     const std::vector<cv::Point3f> &pts2,
+//                                     Eigen::Matrix3d &R, Eigen::Vector3d &t) {
+//    Point3f p1, p2;     // center of mass
+//    int N = pts1.size();
+//    for (int i = 0; i < N; i++) {
+//        p1 += pts1[i];
+//        p2 += pts2[i];
+//    }
+//    p1 = Point3f(Vec3f(p1) / N);
+//    p2 = Point3f(Vec3f(p2) / N);
+//    vector<Point3f> q1(N), q2(N); // remove the center
+//    for (int i = 0; i < N; i++) {
+//        q1[i] = pts1[i] - p1;
+//        q2[i] = pts2[i] - p2;
+//    }
+//
+//    // compute q1*q2^T
+//    Eigen::Matrix3d W = Eigen::Matrix3d::Zero();
+//    for (int i = 0; i < N; i++) {
+//        W += Eigen::Vector3d(q1[i].x, q1[i].y, q1[i].z) * Eigen::Vector3d(q2[i].x, q2[i].y, q2[i].z).transpose();
+//    }
+////    cout << "W=" << W << endl;
+//
+//    // SVD on W
+//    Eigen::JacobiSVD<Eigen::Matrix3d> svd(W, Eigen::ComputeFullU | Eigen::ComputeFullV);
+//    Eigen::Matrix3d U = svd.matrixU();
+//    Eigen::Matrix3d V = svd.matrixV();
+//
+////    cout << "U=" << U << endl;
+////    cout << "V=" << V << endl;
+//
+//    R = U * (V.transpose());
+//    if (R.determinant() < 0) {
+//        R = -R;
+//    }
+//    t = Eigen::Vector3d(p1.x, p1.y, p1.z) - R * Eigen::Vector3d(p2.x, p2.y, p2.z);
+//}
+
 // Perform 2D/2D RANSAC.
 int Frontend::runRansac2d2d(okvis::Estimator& estimator,
                             const okvis::VioParameters& params,
@@ -835,9 +1111,11 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
                             uint64_t olderFrameId,
                             bool initializePose,
                             bool removeOutliers,
-                            bool& rotationOnly) {
+                            bool& rotationOnly,
+                            bool& sonarchangeKf) {
   // match 2d2d
   rotationOnly = false;
+  sonarchangeKf = false;
   const size_t numCameras = params.nCameraSystem.numCameras();
 
   size_t totalInlierNumber = 0;
@@ -851,10 +1129,85 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
         estimator, params.nCameraSystem, olderFrameId, im, currentFrameId, im);
 
     size_t numCorrespondences = adapter.getNumberCorrespondences();
-
+    LOG(INFO) << "numCorrespondences: " << numCorrespondences;
+//    if (numCorrespondences < 10)
+//      continue;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
+    // Modified by Shu Pan
+    // When the number of Correspondences or points low than a threshold, leverage sonar frame
     if (numCorrespondences < 10)
-      continue;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
+    {
+        if (isforwardsonarUsed_)
+        {
+          std::vector<Eigen::Vector3d> PtsC1, PtsC2;
+          okvis::ForwardSonarMeasurement forwardsonarframeA = estimator.forwardsonarFrame(olderFrameId);
+          okvis::ForwardSonarMeasurement forwardsonarframeB = estimator.forwardsonarFrame(currentFrameId);
+          LOG(INFO) << "frameA id " << olderFrameId << ": " << forwardsonarframeA.measurement.keypoints.size()
+                    << " frameB pts " << currentFrameId << ": " << forwardsonarframeB.measurement.keypoints.size();
+          std::vector<Eigen::Vector3d> lastpts;
+          std::vector<Eigen::Vector3d> curpts;
+          estimator.forwardsonarMatching(forwardsonarframeA, forwardsonarframeB, lastpts, curpts);
+//          std::vector<cv::Point3f> lastpts, curpts;
+//          estimator.forwardsonaraddMatch(forwardsonarframeA, forwardsonarframeB, lastpts, curpts);
+          LOG(INFO) << "lastpts size: " << lastpts.size()
+                    << " curpts size: " << curpts.size();
+          for(size_t i = 0; i < lastpts.size(); i++)
+          {
+             okvis::kinematics::Transformation sonar_point(lastpts[i], Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+             okvis::kinematics::Transformation T_PC1 = (*params.nCameraSystem.T_SC(0)).inverse() * params.sonar.T_SSo * sonar_point;
+             Eigen::Vector3d PC1 = T_PC1.r();
+             PtsC1.push_back(PC1);
+          }
+          for(size_t i = 0; i < curpts.size(); i++)
+          {
+             okvis::kinematics::Transformation sonar_point(curpts[i], Eigen::Quaterniond(1.0, 0.0, 0.0, 0.0));
+             okvis::kinematics::Transformation T_PC2 = (*params.nCameraSystem.T_SC(1)).inverse() * params.sonar.T_SSo * sonar_point;
+             Eigen::Vector3d PC2 = T_PC2.r();
+             PtsC2.push_back(PC2);
+          }
+          if(curpts.size() < 10)
+          {
+            sonarchangeKf = true;
+            continue;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
+          }
+          else{
+              Eigen::Matrix3d R;
+              Eigen::Vector3d t;
+              estimator.sonar_pose_estimation(lastpts, curpts, R, t);
+//              sonar_pose_estimation(PtsC1, PtsC2, R, t);
+              Eigen::Quaterniond q(R);
+              okvis::kinematics::Transformation T_S1S2(t, q);
+//              okvis::kinematics::Transformation T_C1C2(t, q);
+              LOG(INFO) << "T_S1S2: " << T_S1S2.T3x4();
+              okvis::kinematics::Transformation T_SCA, T_WSA, T_SC0, T_WS0;
+              uint64_t idA = olderFrameId;
+              uint64_t id0 = currentFrameId;
+              estimator.getCameraSensorStates(idA, im, T_SCA);
+              estimator.get_T_WS(idA, T_WSA);
+              estimator.getCameraSensorStates(id0, im, T_SC0);
+              estimator.get_T_WS(id0, T_WS0);
 
+//              Eigen::Matrix4d T_C1C2_mat = T_C1C2.T();
+//              okvis::kinematics::Transformation T_C1C2_est = T_SCA.inverse() * T_WSA.inverse() * T_WS0 * T_SC0;
+//              T_C1C2_mat.topRightCorner<3, 1>() =
+//                    T_C1C2_mat.topRightCorner<3, 1>() *
+//                    std::max(0.0, static_cast<double>(T_C1C2_mat.topRightCorner<3, 1>().transpose() * T_C1C2_est.r()));
+//               set.
+//              estimator.set_T_WS(id0, T_WSA * T_SCA * (*params.nCameraSystem.T_SC(0)).inverse() * params.sonar.T_SSo * T_S1S2 * T_SC0.inverse());
+              estimator.set_T_WS(id0, T_WSA * params.sonar.T_SSo * T_S1S2 * params.sonar.T_SSo.inverse());
+//              estimator.set_T_WS(id0, T_WSA * T_SCA * T_C1C2 * T_SC0.inverse());
+//              if(abs(t[0]) < 0.001 && abs(t[1]) < 0.001 && abs(t[2]) < 0.001)
+              if(isScaleRefined_ == false)
+                 rotationOnly = true;
+              if(curpts.size() < 30 || (currentFrameId - olderFrameId) > 5)
+                 sonarchangeKf = true;
+              return 0;
+          }
+        }
+        else
+        {
+              continue;  // won't generate meaningful results. let's hope the few correspondences we have are all inliers!!
+        }
+    }
     // try both the rotation-only RANSAC and the relative one:
 
     // create a RelativePoseSac problem and RANSAC
@@ -908,7 +1261,7 @@ int Frontend::runRansac2d2d(okvis::Estimator& estimator,
         inliers.at(rel_pose_ransac.inliers_.at(k)) = true;
       }
     }
-
+    LOG(INFO) << "rel_pose_inliers: " << rel_pose_inliers << " rotation_only_inliers: " << rotation_only_inliers;
     // failure?
     if (!rotation_only_success && !rel_pose_success) {
       continue;

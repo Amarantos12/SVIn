@@ -1,0 +1,58 @@
+<launch>
+
+  <!-- Flag to start recoding a rosbag  -->
+  <arg name="record" default="true"/>
+  <arg name="record_use_ned_frame" default="false"/>
+  <!-- Arguments -->
+<!--   <arg name="config_path" default = "$(find pose_graph)/config/stereo_rig2/stereo_rig_v3_config.yaml" /> -->
+<!-- <arg name="config_path" default="$(find pose_graph)/config/stereo_rig/stereo_rig_v1_config.yaml" /> -->
+<!--   <arg name="config_path" default = "$(find okvis_ros)/okvis/config/config_stereo_rig_aprilgrid.yaml" /> -->
+  <arg name="config_path" value="$(find pose_graph)/config/stereo_rig/stereo_bluerov2_config.yaml"   />
+
+  <param name="/use_sim_time" value="true"/>
+
+
+  <!-- Run pose_graph node-->
+  <node name="pose_graph_node" pkg="pose_graph" type="pose_graph_node" output="screen">
+    <param name=" config_file" type="string" value="$(arg config_path)" />
+  </node>
+
+
+<!--    --><!-- Run the stereo image proc -->
+<!--   <node pkg="stereo_image_proc" type="stereo_image_proc" name="stereo_image_proc" > -->
+<!--     <remap from="/left/image_raw" to="/bluerov2/bluerov2/cameraleft/camera_image" /> -->
+<!--     <remap from="/right/image_raw" to="/bluerov2/bluerov2/cameraright/camera_image" /> -->
+<!--     <remap from="/left/camera_info" to="/bluerov2/bluerov2/cameraleft/camera_info" /> -->
+<!--     <remap from="/right/camera_info" to="/bluerov2/bluerov2/cameraright/camera_info" /> -->
+<!--     <param name="approximate_sync" value="true"/> -->
+<!--   </node> -->
+
+
+  <node name="okvis_node" pkg="okvis_ros" type="okvis_node">
+
+    <param name="config_filename" value="$(find okvis_ros)/okvis/config/config_bluerov2_subsea_pannel.yaml" />
+<!--     <param name="config_filename" value="$(find okvis_ros)/okvis/config/config_stereorig_v1.yaml" /> -->
+<!--     <param name="config_filename" value="$(find okvis_ros)/okvis/config/config_stereo_rig_aprilgrid.yaml" /> -->
+    <param name="mesh_file" value="firefly.dae" />
+
+
+    <remap from="/camera0" to="/bluerov2/bluerov2/cameraleft/camera_image"/>
+    <remap from="/camera1" to="/bluerov2/bluerov2/cameraright/camera_image"/>
+
+    <remap from="/imu" to="/bluerov2/imu" />
+
+  </node>
+
+<!--    <include file="$(find okvis_ros)/launch/SVIN2_record.launch"> -->
+<!--      <arg name="record" value="$(arg record)"/> -->
+<!--      <arg name="record_use_ned_frame" value="$(arg record_use_ned_frame)"/> -->
+<!--    </include> -->
+<!--   <node name="bagTotxt_node" pkg="rosbagtotxt" type="bagTotxt_node"> </node> -->
+
+  <node name="rviz" pkg="rviz" type="rviz" args="-d $(find okvis_ros)/config/rviz_svin.rviz" />
+
+
+</launch>
+
+
+

@@ -59,6 +59,7 @@ namespace okvis {
 // Sharmin: Read from config file.
 struct SensorList {
   bool isSonarUsed;
+  bool isForwardSonarUsed;
   bool isDepthUsed;
 };
 

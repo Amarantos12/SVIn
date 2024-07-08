@@ -378,6 +378,8 @@ class Publisher {
   std::vector<ros::Publisher> pubDebugImage_;
 
   bool static_tf_published_;  ///< Whether the static transform has been published.
+
+  ofstream save_file;
 };
 
 }  // namespace okvis

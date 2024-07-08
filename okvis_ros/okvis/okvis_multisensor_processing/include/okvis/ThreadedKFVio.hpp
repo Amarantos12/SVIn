@@ -185,6 +185,17 @@ class ThreadedKFVio : public VioInterface {
   /// \param range    Distance where sonar beam hit
   /// \param heading  head position of sonar beam.
   virtual bool addSonarMeasurement(const okvis::Time& stamp, double range, double heading);
+
+  /// @ShuPan
+  /// \brief          Add an Forward Sonar measurement.
+  /// \param stamp    The measurement timestamp.
+  /// \param image    The forward sonar image at this time.
+  /// \param sonar_range    Max range sonar beam hit
+  /// \param range_resolution  resolution between sonar beam.
+  virtual bool addFSonarMeasurement(const okvis::Time& stamp,
+                                    const cv::Mat& image,
+                                    double sonar_range,
+                                    double range_resolution);
   /**
    * \brief                      Add a position measurement.
    * \warning Not implemented.
@@ -302,6 +313,9 @@ class ThreadedKFVio : public VioInterface {
   /// \brief Loop that publishes the newest state and landmarks.
   void publisherLoop();
 
+  // ShuPan
+  void forwardsonarConsumerLoop();
+
   /**
    * @brief Get a subset of the recorded IMU measurements.
    * @param start The first IMU measurement in the return value will be older than this timestamp.
@@ -332,6 +346,18 @@ class ThreadedKFVio : public VioInterface {
    * @return The Sonar Measurement spanning at least the time between start and end.
    */
   okvis::SonarMeasurementDeque getSonarMeasurements(okvis::Time& start, okvis::Time& end);  // NOLINT
+
+  /**
+   * @ShuPan
+   * @brief Get a subset of the recorded Forward Sonar measurements.
+   * @param start The first Sonar measurement in the return value will be older than this timestamp.
+   * @param end The last Sonar measurement in the return value will be newer than this timestamp.
+   * @remark This function is threadsafe.
+   * @return The Sonar Measurement spanning at least the time between start and end.
+   */
+  okvis::ForwardSonarMeasurementDeque getForwardSonarMeasurements(okvis::Time& start, okvis::Time& end);  // NOLINT
+
+  okvis::ForwardSonarMeasurement getSingleForwardSonarMeasurements(okvis::Time& time);  // NOLINT
 
   /**
    * @brief Remove IMU measurements from the internal buffer.
@@ -398,7 +424,8 @@ class ThreadedKFVio : public VioInterface {
 
   okvis::Time lastAddedStateTimestamp_;  ///< Timestamp of the newest state in the Estimator.
   okvis::Time lastAddedImageTimestamp_;  ///< Timestamp of the newest image added to the image input queue.
-
+  // @shupan
+  okvis::Time lastAddedSonarImageTimestamp_;  ///< Timestamp of the newest sonar image added to the image input queue.
   /// @name Measurement input queues
   /// @{
 
@@ -414,6 +441,10 @@ class ThreadedKFVio : public VioInterface {
   /// @Sharmin
   /// Sonar measurement input queue.
   okvis::threadsafe::ThreadSafeQueue<okvis::SonarMeasurement> sonarMeasurementsReceived_;
+
+  /// @ShuPan
+  /// Forward Sonar measurement input queue.
+  okvis::threadsafe::ThreadSafeQueue<okvis::ForwardSonarMeasurement> ForwardsonarMeasurementsReceived_;
 
   /// @Sharmin
   /// Depth measurement input queue.
@@ -449,6 +480,10 @@ class ThreadedKFVio : public VioInterface {
   /// The queue containing the actual display images
   okvis::threadsafe::ThreadSafeQueue<std::vector<cv::Mat>> displayImages_;
 
+  okvis::ForwardSonarMeasurementDeque forwardsonarMeasurements_;   /// @ShuPan
+  okvis::Time sonarKeyFrameTime_;
+  okvis::kinematics::Transformation T_SonarKeyFrame_;
+  okvis::KeyForwardSonarMeasurementDeque sonarTransformMeasurements_;
   /// @}
   /// @name Mutexes
   /// @{
@@ -483,6 +518,21 @@ class ThreadedKFVio : public VioInterface {
   std::thread magnetometerConsumerThread_;            ///< Thread running magnetometerConsumerLoop().
   std::thread differentialConsumerThread_;            ///< Thread running differentialConsumerLoop().
 
+  // @ShuPan
+  std::thread forwardsonarConsumerThread_;            ///< Thread running imagesonarConsumerLoop().
+  std::mutex forwardsonarMeasurements_mutex_;         ///< Lock when accessing forwardsonarMeasurements_
+  bool iskeysonarFrame = false;                       /// whether the sonar frame is keyframe
+  cv::Mat KeySonarFrame;                              /// sonar keyframe
+  cv::Mat keyframe_copy;
+  int SonarFrameIndex_ = 0;
+  double sonar_resolution;
+  okvis::kinematics::Transformation T_WKFSo_;         /// Shu Pan
+  okvis::kinematics::Transformation T_WSLast_;
+  okvis::Time lastforwardsonartime_;
+  okvis::Time lastfsonarDTime_;
+  okvis::ForwardSonarMeasurement lastforwardsonarData;
+  okvis::Time keyforwardsonarFrameTime_;
+  uint64_t keyFrameId_;
   /// @}
   /// @name Algorithm threads
   /// @{

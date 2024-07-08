@@ -347,6 +347,7 @@ bool Map::removeParameterBlock(std::shared_ptr<okvis::ceres::ParameterBlock> par
     std::shared_ptr< ::ceres::CostFunction> cost_function,
     ::ceres::LossFunction* loss_function,
     std::vector<std::shared_ptr<okvis::ceres::ParameterBlock> >& parameterBlockPtrs) {
+//  LOG(INFO) << "!!!!!!!!Map::addResidualBlock!!!!!!!!!!!";
   ::ceres::ResidualBlockId return_id;
   std::vector<double*> parameter_blocks;
   ParameterBlockCollection parameterBlockCollection;

@@ -277,6 +277,9 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
   success = parseBoolean(file["isSonarUsed"], vioParameters_.sensorList.isSonarUsed);
   OKVIS_ASSERT_TRUE(Exception, success, "'isSonarUsed' parameter missing in configuration file.");
 
+  success = parseBoolean(file["isForwardSonarUsed"], vioParameters_.sensorList.isForwardSonarUsed);
+  OKVIS_ASSERT_TRUE(Exception, success, "'isForwardSonarUsed' parameter missing in configuration file.");
+
   success = parseBoolean(file["isDepthUsed"], vioParameters_.sensorList.isDepthUsed);
   OKVIS_ASSERT_TRUE(Exception, success, "'isDepthUsed' parameter missing in configuration file.");
 
@@ -313,7 +316,7 @@ void VioParametersReader::readConfigFile(const std::string& filename) {
 
   // sonar parameters
 
-  if (vioParameters_.sensorList.isSonarUsed) {
+  if (vioParameters_.sensorList.isSonarUsed || vioParameters_.sensorList.isForwardSonarUsed) {
     cv::FileNode T_SSo_ = file["sonar_params"]["T_SSo"];
     OKVIS_ASSERT_TRUE(
         Exception, T_SSo_.isSeq(), "'T_SSo_' parameter missing in the configuration file or in the wrong format.")

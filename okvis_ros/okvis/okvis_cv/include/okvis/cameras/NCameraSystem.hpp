@@ -143,6 +143,8 @@ class NCameraSystem {
   /// @return True, if there is at least one pixel of overlap.
   inline bool hasOverlap(size_t cameraIndexSeenBy, size_t cameraIndex) const;
 
+  okvis::kinematics::Transformation get_TSC(size_t cameraIndex){ return *T_SC_[cameraIndex];}
+
  protected:
   /// \brief Use this to check overlapMats_ and overlaps_ have correct sizes
   /// @return True, if valid.
